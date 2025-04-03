@@ -1,6 +1,6 @@
 import { ItemView, WorkspaceLeaf, TFile, Notice, setIcon } from "obsidian";
 import LocalChatPlugin from "./main"; // Імпортуємо головний клас плагіну для взаємодії
-
+import { UserInfo } from './types';
 export const CHAT_VIEW_TYPE = "local-chat-view";
 
 export class ChatView extends ItemView {
@@ -12,7 +12,7 @@ export class ChatView extends ItemView {
     fileButtonEl: HTMLElement; // Кнопка надсилання файлу (додамо пізніше)
 
     // Зберігаємо відомих користувачів для легкого доступу/оновлення
-    knownUsers: Map<string, { nickname: string, ip: string, port: number, element?: HTMLElement }> = new Map();
+    private knownUsers: Map<string, { nickname: string, element?: HTMLElement }> = new Map();
 
 
     constructor(leaf: WorkspaceLeaf, plugin: LocalChatPlugin) {
@@ -173,50 +173,38 @@ export class ChatView extends ItemView {
         // Автоматична прокрутка донизу
         this.scrollToBottom();
     }
-
-    // --- Метод для додавання користувача до списку (викликається плагіном) ---
-    addUserToList(userInfo: { nickname: string, ip: string, port: number }) {
+    addUserToList(userInfo: UserInfo): void { // Приймає { nickname: string }
         if (this.knownUsers.has(userInfo.nickname)) {
-            // Якщо користувач вже є, можемо оновити його статус (наприклад, зробити активним)
             const existing = this.knownUsers.get(userInfo.nickname);
-            if (existing?.element) {
-                existing.element.removeClass('user-offline'); // Прибираємо можливий статус "офлайн"
-                existing.element.addClass('user-online');
-            }
-            return;
+            if (existing?.element) existing.element.addClass('user-online'); // Просто оновлюємо статус
+            return; // Вже в списку
         }
 
+        // Створюємо DOM елемент
         const userEl = this.userListEl.createDiv({ cls: "chat-user-list-item user-online" });
-        userEl.dataset.nickname = userInfo.nickname; // Зберігаємо нік для ідентифікації
-
+        userEl.dataset.nickname = userInfo.nickname;
         const iconEl = userEl.createSpan({ cls: 'user-icon' });
-        setIcon(iconEl, 'user'); // Іконка користувача
-
+        setIcon(iconEl, 'user');
         userEl.createSpan({ cls: 'user-nickname', text: userInfo.nickname });
 
-        // Зберігаємо інформацію про користувача та його DOM-елемент
-        this.knownUsers.set(userInfo.nickname, { ...userInfo, element: userEl });
-
-        // TODO: Додати обробник кліку на користувача для приватних повідомлень?
-        // userEl.addEventListener('click', () => { this.handleUserClick(userInfo.nickname); });
+        // Додаємо до мапи об'єкт БЕЗ ip та port
+        this.knownUsers.set(userInfo.nickname, { nickname: userInfo.nickname, element: userEl });
     }
 
-    // --- Метод для видалення користувача зі списку (викликається плагіном) ---
-    removeUserFromList(nickname: string) {
-        const userData = this.knownUsers.get(nickname);
-        if (userData?.element) {
-            userData.element.remove(); // Видаляємо елемент зі списку
-            this.knownUsers.delete(nickname); // Видаляємо користувача з мапи
-        } else {
-            // Можливо, користувач вже був видалений або не існував
-            console.warn(`[${this.plugin.manifest.name}] Спроба видалити неіснуючого користувача зі списку: ${nickname}`);
+    // --- Метод removeUserFromList ---
+    removeUserFromList(nickname: string): void {
+        const userData = this.knownUsers.get(nickname); // Отримує { nickname, element? }
+        userData?.element?.remove(); // Видаляємо DOM елемент, якщо він є
+        if (this.knownUsers.delete(nickname)) {
+            console.log(`[${this.plugin.manifest.name}] Removed user '${nickname}' from UI list.`);
         }
     }
 
-    // --- Метод для очищення області повідомлень (може викликатись плагіном) ---
-    clearMessages() {
-        this.messageContainerEl.empty();
-        new Notice("Історію повідомлень очищено (в поточному вікні).");
+    // --- Метод clearUserList (додайте, якщо його ще немає) ---
+    clearUserList(): void {
+        if (this.userListEl) this.userListEl.empty(); // Перевірка наявності userListEl
+        this.knownUsers.clear();
+        console.log(`[${this.plugin.manifest.name}] Cleared user list in UI.`);
     }
 
     displayFileOffer(senderNickname: string, fileInfo: { fileId: string, filename: string, size: number }) {

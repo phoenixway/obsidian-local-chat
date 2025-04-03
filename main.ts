@@ -1,48 +1,44 @@
-// main.ts
-import { App, Notice, Plugin, PluginSettingTab, Setting, WorkspaceLeaf, TFolder } from 'obsidian';
+import { App, Notice, Plugin, PluginSettingTab, Setting, WorkspaceLeaf, TFolder, Platform } from 'obsidian'; // Use TFolder
 import { ChatView, CHAT_VIEW_TYPE } from './ChatView';
-import { NetworkManager, NetworkManagerCallbacks } from './NetworkManager';
-import { UserDiscovery, UserDiscoveryCallbacks, UserDiscoveryConfig } from './UserDiscovery'; // Assuming UserDiscovery exports these
+// Import managers and their callbacks
+import { WebSocketServerManager, WebSocketServerCallbacks } from './WebSocketServerManager';
+import { WebSocketClientManager, WebSocketClientCallbacks } from './WebSocketClientManager';
+// Import shared types from types.ts
+import {
+	UserInfo,
+	LocalChatPluginSettings,
+	OutgoingFileOfferState,
+	IncomingFileOfferState,
+	WebSocketMessage,
+	DEFAULT_SETTINGS,
+	TextMessage,
+	FileOfferMessage,
+	FileAcceptMessage,
+	FileDeclineMessage,
+	UserListMessage,
+	UserJoinMessage,
+	UserLeaveMessage,
+	IdentifyMessage, // Assuming this was added to types.ts
+	BaseMessage,
+
+} from './types';
+import { ChatSettingTab } from './SettingsTab'
+
 import * as fs from 'fs';
 import * as path from 'path';
-
-// --- Interfaces & Types ---
-
-// Export UserInfo so UserDiscovery.ts can import it from here
-export interface UserInfo {
-	nickname: string;
-	ip: string;
-	port: number;
-}
-
-// Define settings interface
-interface LocalChatPluginSettings {
-	userNickname: string;
-	listenPort: number;
-	saveHistory: boolean;
-	downloadPath: string; // Path relative to vault root, or empty for default attachment folder
-}
-
-// --- Constants ---
-
-export const DEFAULT_SETTINGS: LocalChatPluginSettings = {
-	userNickname: `ObsidianUser_${Math.random().toString(36).substring(2, 8)}`,
-	listenPort: 61337,
-	saveHistory: true,
-	downloadPath: '',
-}
-
-// --- Main Plugin Class ---
-
 export default class LocalChatPlugin extends Plugin {
 	settings: LocalChatPluginSettings;
 	chatView: ChatView | null = null;
-	networkManager: NetworkManager | null = null;
-	userDiscovery: UserDiscovery | null = null; // Initialize as null
+	webSocketClientManager: WebSocketClientManager | null = null;
+	webSocketServerManager: WebSocketServerManager | null = null;
 
 	// File transfer state
-	private outgoingFileOffers: Map<string, { fileId: string; filePath: string; filename: string; size: number; recipientNickname: string | null; }> = new Map();
-	private incomingFileOffers: Map<string, { fileId: string; filename: string; size: number; senderNickname: string; senderAddress: string; }> = new Map();
+	private outgoingFileOffers: Map<string, OutgoingFileOfferState> = new Map();
+	// Ensure IncomingFileOfferState requires senderNickname
+	private incomingFileOffers: Map<string, IncomingFileOfferState> = new Map();
+
+	// User list (key: nickname)
+	private knownUsers: Map<string, UserInfo> = new Map();
 
 	// --- Plugin Lifecycle ---
 
@@ -51,392 +47,672 @@ export default class LocalChatPlugin extends Plugin {
 		console.log(`${pluginName} Loading plugin...`);
 
 		await this.loadSettings();
-		console.log(`${pluginName} Settings loaded. Nickname: ${this.settings.userNickname}, Port: ${this.settings.listenPort}`);
+		console.log(`${pluginName} Role: ${this.settings.role}. Nickname: ${this.settings.userNickname}.`);
 
-		// Define callbacks
-		const networkCallbacks: NetworkManagerCallbacks = this.createNetworkCallbacks();
-		const discoveryCallbacks: UserDiscoveryCallbacks = this.createUserDiscoveryCallbacks();
+		const clientCallbacks: WebSocketClientCallbacks = this.createClientCallbacks();
+		const serverCallbacks: WebSocketServerCallbacks = this.createServerCallbacks();
 
-		// Initialize Network components
-		this.networkManager = new NetworkManager(this.settings.listenPort, networkCallbacks);
-		this.userDiscovery = new UserDiscovery({
-			nickname: this.settings.userNickname,
-			port: this.settings.listenPort
-		}, discoveryCallbacks);
+		// Initialize and start based on role
+		if (this.settings.role === 'server') {
+			if (Platform.isMobile) {
+				new Notice("Error: 'Server' role is not supported on mobile. Change in settings.", 10000);
+				console.error(`${pluginName} Cannot start in server mode on mobile.`);
+			} else {
+				console.log(`${pluginName} Initializing in SERVER mode on port ${this.settings.serverPort}...`);
+				try {
+					// Dynamic import of 'ws' for desktop-only server
+					const WSS = await import('ws');
+					const WebSocketServer = WSS.WebSocketServer; // Or WSS.default if needed
 
-		// Start network services sequentially
-		try {
-			await this.networkManager.startServer();
-			console.log(`${pluginName} TCP server started on port ${this.settings.listenPort}.`);
-
-			await this.userDiscovery.start();
-			console.log(`${pluginName} User discovery started.`);
-
-			new Notice(`${this.manifest.name}: Chat service active.`);
-
-		} catch (error: any) {
-			console.error(`${pluginName} CRITICAL ERROR starting network services:`, error);
-			new Notice(`[${this.manifest.name}] Failed to start chat services! Error: ${error.message}. Chat will be unavailable.`);
-			await this.cleanupNetworkServices(); // Attempt cleanup
-			return; // Prevent further loading
+					this.webSocketServerManager = new WebSocketServerManager(
+						this.settings.serverPort,
+						this.settings.userNickname, // Pass own nickname
+						serverCallbacks,
+						WebSocketServer
+					);
+					await this.webSocketServerManager.start();
+					// Add self to user list immediately
+					this.handleUserFound({ nickname: this.settings.userNickname });
+					new Notice(`${this.manifest.name}: Server started on port ${this.settings.serverPort}.`);
+				} catch (error: any) {
+					console.error(`${pluginName} CRITICAL ERROR starting WebSocket server:`, error);
+					new Notice(`[${this.manifest.name}] Failed to start server! Error: ${error.message}.`, 10000);
+					this.webSocketServerManager = null; // Ensure it's null on failure
+				}
+			}
+		} else { // Role is 'client'
+			console.log(`${pluginName} Initializing in CLIENT mode. Connecting to ${this.settings.serverAddress}...`);
+			if (!this.settings.serverAddress || !this.settings.serverAddress.toLowerCase().startsWith('ws')) {
+				new Notice(`[${this.manifest.name}] Invalid server address: "${this.settings.serverAddress}". Check settings.`, 10000);
+				console.error(`${pluginName} Invalid server address.`);
+			} else {
+				this.webSocketClientManager = new WebSocketClientManager(clientCallbacks);
+				// Attempt connection (success/failure handled by callbacks)
+				this.webSocketClientManager.connect(this.settings.serverAddress, this.settings.userNickname);
+			}
 		}
 
-		// Register Obsidian UI components
+		// Register UI components (always register, functionality depends on network status)
 		this.registerView(
 			CHAT_VIEW_TYPE,
 			(leaf) => {
 				this.chatView = new ChatView(leaf, this);
-				this.populateInitialChatViewState(); // Populate users/history on view open
+				this.populateInitialChatViewState();
 				return this.chatView;
 			}
 		);
-
 		this.addRibbonIcon('message-circle', 'Open Local Chat', () => this.activateView());
-		this.addCommand({
-			id: 'open-local-chat-view',
-			name: 'Open Local Chat panel',
-			callback: () => this.activateView(),
-		});
+		this.addCommand({ id: 'open-local-chat-view', name: 'Open Local Chat panel', callback: () => this.activateView() });
 		this.addSettingTab(new ChatSettingTab(this.app, this));
 
-		console.log(`${pluginName} Plugin loaded successfully.`);
+		console.log(`${pluginName} Plugin UI initialized.`);
 	}
 
 	async onunload() {
 		console.log(`[${this.manifest.name}] Unloading plugin...`);
 		await this.cleanupNetworkServices();
-
-		// Clean up UI and plugin state
 		this.app.workspace.detachLeavesOfType(CHAT_VIEW_TYPE);
 		this.chatView = null;
 		this.outgoingFileOffers.clear();
 		this.incomingFileOffers.clear();
-
+		this.knownUsers.clear();
 		console.log(`[${this.manifest.name}] Plugin unloaded.`);
 	}
 
-	/** Populates the chat view with current users and potentially history */
 	private populateInitialChatViewState(): void {
 		if (!this.chatView) return;
-		// Add currently known users to the list
-		this.userDiscovery?.getAllUsers().forEach(user => this.chatView?.addUserToList(user));
-		// TODO: Load and display chat history from storage
-		console.log(`[${this.manifest.name}] Populated initial chat view state.`);
+		this.knownUsers.forEach(user => this.chatView?.addUserToList(user));
+		// TODO: Load and display chat history
 	}
 
-	// --- Network Service Cleanup ---
 	private async cleanupNetworkServices(): Promise<void> {
-		if (this.userDiscovery) {
-			try {
-				await this.userDiscovery.stop();
-				console.log(`[${this.manifest.name}] User discovery stopped.`);
-			} catch (err) { console.error(`[${this.manifest.name}] Error stopping UserDiscovery:`, err); }
-			this.userDiscovery = null;
+		if (this.webSocketClientManager) {
+			this.webSocketClientManager.disconnect();
+			this.webSocketClientManager = null;
+			console.log(`[${this.manifest.name}] WebSocket client disconnected.`);
 		}
-		if (this.networkManager) {
+		if (this.webSocketServerManager) {
 			try {
-				await this.networkManager.stopServer();
-				console.log(`[${this.manifest.name}] TCP server stopped.`);
-			} catch (err) { console.error(`[${this.manifest.name}] Error stopping NetworkManager:`, err); }
-			this.networkManager = null;
+				await this.webSocketServerManager.stop();
+				console.log(`[${this.manifest.name}] WebSocket server stopped.`);
+			} catch (err) { console.error(`[${this.manifest.name}] Error stopping WebSocket server:`, err); }
+			this.webSocketServerManager = null;
 		}
 	}
 
 	// --- Callback Creation ---
 
-	private createNetworkCallbacks(): NetworkManagerCallbacks {
-		// Return the object with bound methods
+	private createClientCallbacks(): WebSocketClientCallbacks {
 		return {
-			onMessageReceived: this.handleIncomingMessage.bind(this),
-			onFileOfferReceived: this.handleIncomingFileOffer.bind(this),
-			onFileAcceptReceived: this.handleFileAcceptReceived.bind(this),
-			onFileDeclineReceived: this.handleFileDeclineReceived.bind(this),
-			onFileTransferStart: this.handleFileTransferStart.bind(this),
-			onFileTransferProgress: this.handleFileTransferProgress.bind(this),
-			onFileTransferComplete: this.handleFileTransferComplete.bind(this),
-			onFileTransferError: this.handleFileTransferError.bind(this),
-			onClientConnected: (clientInfo) => console.log(`[${this.manifest.name}] Client connected: ${clientInfo.ip}:${clientInfo.port}`),
-			onClientDisconnected: (clientInfo) => console.log(`[${this.manifest.name}] Client disconnected: ${clientInfo.ip}:${clientInfo.port}`),
-			onNetworkError: (context, error) => {
-				const isCommonError = ['ECONNREFUSED', 'ETIMEDOUT', 'EHOSTUNREACH'].some(code => error.message.includes(code));
-				if (isCommonError) console.warn(`[${this.manifest.name}] Network Error (${context}): ${error.message}`);
-				else { console.error(`[${this.manifest.name}] Serious Network Error (${context}):`, error); new Notice(`Network Error (${context}): ${error.message}`); }
+			onOpen: () => {
+				console.log(`[${this.manifest.name}] Client: Connected.`);
+				new Notice("Chat connected.", 3000);
+				// Server should send user list automatically after identification
+			},
+			onClose: (event) => {
+				console.warn(`[${this.manifest.name}] Client: Disconnected. Code: ${event.code}`);
+				new Notice("Chat disconnected.", 5000);
+				this.knownUsers.clear();
+				this.chatView?.clearUserList?.(); // Call method to clear UI list
+				// Reconnect logic is handled within WebSocketClientManager
+			},
+			onError: (event) => {
+				console.error(`[${this.manifest.name}] Client: WebSocket Error`, event);
+				new Notice("Chat connection error.", 5000);
+			},
+			onMessage: (message) => {
+				console.debug(`[${this.manifest.name}] Client: Received message`, message);
+				this.handleServerMessage(message); // Route message for processing
 			},
 		};
 	}
 
-	private createUserDiscoveryCallbacks(): UserDiscoveryCallbacks {
-		// Return the object with bound methods
+	private createServerCallbacks(): WebSocketServerCallbacks {
 		return {
-			onUserFound: this.handleUserFound.bind(this),
-			onUserLeft: this.handleUserLeft.bind(this),
-			onDiscoveryError: (context, error) => {
-				console.error(`[${this.manifest.name}] Discovery Error (${context}):`, error);
-				new Notice(`Discovery Error: ${error.message}`);
-			}
+			// Note: clientId type should be string in the interface definition
+			onClientConnected: (clientId: string, clientNickname: string) => {
+				console.log(`[${this.manifest.name}] Server: Client '${clientNickname}' connected (ID: ${clientId})`);
+				const newUserInfo: UserInfo = { nickname: clientNickname };
+				this.handleUserFound(newUserInfo); // Add user and notify others
+
+				// Send current user list to the newly connected client
+				const userListPayload: UserListMessage = {
+					type: 'userList',
+					users: this.getAllUsers(),
+					timestamp: Date.now() // Add timestamp
+				};
+				this.webSocketServerManager?.sendToClient(clientId, userListPayload);
+			},
+			onClientDisconnected: (clientId: string, clientNickname: string) => {
+				console.log(`[${this.manifest.name}] Server: Client '${clientNickname}' disconnected (ID: ${clientId})`);
+				this.handleUserLeft({ nickname: clientNickname }); // Remove user and notify others
+			},
+			// Note: clientId type should be string
+			onMessage: (clientId: string, clientNickname: string, message: WebSocketMessage) => {
+				console.debug(`[${this.manifest.name}] Server: Message from '${clientNickname}' (ID: ${clientId})`, message);
+				this.handleClientMessage(clientId, clientNickname, message); // Route message for processing/relay
+			},
+			onError: (error) => {
+				console.error(`[${this.manifest.name}] Server: Error`, error);
+				new Notice(`Chat Server Error: ${error.message}`, 5000);
+			},
 		};
 	}
 
-	// --- Network & Discovery Callback Handlers ---
+	// --- Message Handling ---
 
-	private handleIncomingMessage(sender: { ip: string, port: number }, message: any): void {
-		const senderInfo = this.userDiscovery?.getAllUsers().find(u => u.ip === sender.ip && u.port === sender.port);
-		const senderNickname = senderInfo?.nickname || message.senderNickname || `${sender.ip}:${sender.port}`;
-
-		if (message.type === 'text' && message.content) {
-			console.log(`[${this.manifest.name}] Received text from ${senderNickname}`);
-			this.chatView?.displayMessage(senderNickname, message.content, message.timestamp || Date.now(), false);
-			// TODO: Save message to history
-			if (!this.isChatViewActive()) new Notice(`${senderNickname}: ${message.content.substring(0, 50)}...`);
-		} else {
-			console.warn(`[${this.manifest.name}] Received unknown message type:`, message);
+	/** Handles messages received BY THE CLIENT from the server */
+	private handleServerMessage(message: WebSocketMessage): void {
+		// Use type guards before accessing specific properties
+		switch (message.type) {
+			case 'text': { // Use braces for block scope
+				const msg = message as TextMessage;
+				// Use fallback for senderNickname if it's optional in BaseMessage but required here
+				const sender = msg.senderNickname || 'Unknown';
+				console.log(`[${this.manifest.name}] Handling incoming text from ${sender}`);
+				this.chatView?.displayMessage(sender, msg.content, msg.timestamp || Date.now(), false);
+				// TODO: Save history
+				break;
+			}
+			case 'fileOffer': {
+				const offerMsg = message as FileOfferMessage;
+				const sender = offerMsg.senderNickname || 'Unknown'; // Provide fallback
+				console.log(`[${this.manifest.name}] Handling incoming fileOffer from ${sender}`);
+				// Ensure senderNickname in the state is non-optional string
+				this.incomingFileOffers.set(offerMsg.fileId, { ...offerMsg, senderNickname: sender });
+				this.chatView?.displayFileOffer(sender, offerMsg);
+				if (!this.isChatViewActive()) new Notice(`File offer '${offerMsg.filename}' from ${sender}`);
+				break;
+			}
+			case 'fileAccept': {
+				const acceptMsg = message as FileAcceptMessage;
+				console.log(`[${this.manifest.name}] Handling incoming fileAccept for ${acceptMsg.fileId} from ${acceptMsg.senderNickname}`);
+				// Call the method that STARTS the upload process
+				this.handleRemoteFileAccept(acceptMsg.fileId, acceptMsg.senderNickname);
+				break;
+			}
+			case 'fileDecline': {
+				const declineMsg = message as FileDeclineMessage;
+				console.log(`[${this.manifest.name}] Handling incoming fileDecline for ${declineMsg.fileId} from ${declineMsg.senderNickname}`);
+				// Call the method that HANDLES the remote decline
+				this.handleRemoteFileDecline(declineMsg.fileId, declineMsg.senderNickname);
+				break;
+			}
+			case 'userList': {
+				const listMsg = message as UserListMessage;
+				console.log(`[${this.manifest.name}] Received user list from server`, listMsg.users);
+				this.knownUsers.clear();
+				// Ensure users received have the correct UserInfo structure ({ nickname })
+				listMsg.users.forEach((user: UserInfo) => this.knownUsers.set(user.nickname, user));
+				this.chatView?.clearUserList?.(); // Call the method here
+				this.knownUsers.forEach(user => this.chatView?.addUserToList(user)); // Use updated UserInfo type
+				break;
+			}
+			case 'userJoin': {
+				const joinMsg = message as UserJoinMessage;
+				console.log(`[${this.manifest.name}] User joined: ${joinMsg.nickname}`);
+				// Pass simplified UserInfo
+				this.handleUserFound({ nickname: joinMsg.nickname });
+				break;
+			}
+			case 'userLeave': {
+				const leaveMsg = message as UserLeaveMessage;
+				console.log(`[${this.manifest.name}] User left: ${leaveMsg.nickname}`);
+				this.handleUserLeft({ nickname: leaveMsg.nickname });
+				break;
+			}
+			default:
+				console.warn(`[${this.manifest.name}] Received unhandled message type from server:`, message.type);
 		}
 	}
 
-	private handleIncomingFileOffer(sender: { ip: string, port: number }, fileInfo: { fileId: string, filename: string, size: number }): void {
-		const senderInfo = this.userDiscovery?.getAllUsers().find(u => u.ip === sender.ip && u.port === sender.port);
-		const senderNickname = senderInfo?.nickname || "Unknown Sender"; // Use found nickname or fallback
-		const senderAddress = `${sender.ip}:${sender.port}`;
+	/** Handles messages received BY THE SERVER from a specific client */
+	private handleClientMessage(clientId: string, clientNickname: string, message: WebSocketMessage): void {
+		if (!this.webSocketServerManager) return;
 
-		console.log(`[${this.manifest.name}] Received file offer '${fileInfo.filename}' from ${senderNickname} (${senderAddress}) (ID: ${fileInfo.fileId})`);
-		this.incomingFileOffers.set(fileInfo.fileId, { ...fileInfo, senderNickname, senderAddress });
-		this.chatView?.displayFileOffer(senderNickname, fileInfo);
-		if (!this.isChatViewActive()) new Notice(`File offer '${fileInfo.filename}' from ${senderNickname}`);
-	}
+		// Ensure senderNickname matches the identified client
+		if (message.senderNickname && message.senderNickname !== clientNickname) {
+			console.warn(`[${this.manifest.name}] Message senderNickname mismatch from client ${clientId}. Claimed: '${message.senderNickname}', Actual: '${clientNickname}'. Using actual.`);
+		}
+		message.senderNickname = clientNickname; // Always set sender to identified client
 
-	private handleFileAcceptReceived(sender: { ip: string, port: number }, fileId: string): void {
-		console.log(`[${this.manifest.name}] Received fileAccept for ${fileId} from ${sender.ip}:${sender.port}`);
-		const offer = this.outgoingFileOffers.get(fileId);
-
-		if (!offer) { console.error(`[${this.manifest.name}] Unknown outgoing offer ID for fileAccept: ${fileId}`); return; }
-		if (!this.networkManager) { console.error(`[${this.manifest.name}] NM inactive, cannot start transfer ${fileId}`); return; }
-
-		console.log(`[${this.manifest.name}] Starting upload for ${offer.filename}`);
-		this.networkManager.startFileTransfer(sender.ip, sender.port, fileId, offer.filePath)
-			.then(() => console.log(`[${this.manifest.name}] Upload initiated for ${fileId}.`))
-			.catch(err => {
-				console.error(`[${this.manifest.name}] Failed initiate startFileTransfer ${fileId}:`, err);
-				new Notice(`Failed to start sending ${offer.filename}.`);
-				this.outgoingFileOffers.delete(fileId);
-				this.chatView?.updateFileProgress?.(fileId, 'upload', 0, offer.size, 'error');
-			});
-	}
-
-	private handleFileDeclineReceived(sender: { ip: string, port: number }, fileId: string): void {
-		console.log(`[${this.manifest.name}] Received fileDecline for ${fileId} from ${sender.ip}:${sender.port}`);
-		const offer = this.outgoingFileOffers.get(fileId);
-		if (offer) {
-			new Notice(`User declined file: ${offer.filename}`);
-			this.outgoingFileOffers.delete(fileId);
-			this.chatView?.updateFileProgress?.(fileId, 'upload', 0, offer.size || 0, 'declined');
-		} else {
-			console.warn(`[${this.manifest.name}] Received fileDecline for unknown outgoing offer ID: ${fileId}`);
+		// Use type guards before accessing specific properties
+		switch (message.type) {
+			case 'text': {
+				const msg = message as TextMessage;
+				console.log(`[${this.manifest.name}] Broadcasting text from ${clientNickname}`);
+				// Broadcast to others, excluding sender
+				this.webSocketServerManager.broadcast(clientId, msg);
+				// Display on server's own UI
+				this.chatView?.displayMessage(msg.senderNickname, msg.content, msg.timestamp || Date.now(), false);
+				// TODO: Save history (on server)
+				break;
+			}
+			case 'fileOffer': {
+				const offerMsg = message as FileOfferMessage;
+				const recipient = offerMsg.recipient; // Check if recipient is specified
+				if (recipient) { // Relay private offer
+					console.log(`[${this.manifest.name}] Relaying private fileOffer from ${clientNickname} to ${recipient}`);
+					if (!this.webSocketServerManager.sendToClientByNickname(recipient, offerMsg)) {
+						console.warn(`[${this.manifest.name}] Recipient ${recipient} not found for file offer relay.`);
+						// TODO: Notify sender of failure? ({ type: 'error', message: `User ${recipient} not found` })
+					}
+				} else { // Broadcast offer
+					console.log(`[${this.manifest.name}] Broadcasting fileOffer from ${clientNickname}`);
+					this.webSocketServerManager.broadcast(clientId, offerMsg);
+					// Also show offer on server's UI
+					this.incomingFileOffers.set(offerMsg.fileId, { ...offerMsg, senderNickname: clientNickname, senderClientId: clientId });
+					this.chatView?.displayFileOffer(clientNickname, offerMsg);
+				}
+				break;
+			}
+			case 'fileAccept':
+			case 'fileDecline': {
+				// Relay accept/decline back to the original sender of the file offer
+				const responseMsg = message as FileAcceptMessage | FileDeclineMessage; // Use specific types
+				const originalSenderNick = responseMsg.originalSender; // Client MUST include who they are responding to
+				if (originalSenderNick) {
+					console.log(`[${this.manifest.name}] Relaying ${responseMsg.type} for ${responseMsg.fileId} from ${clientNickname} to original sender ${originalSenderNick}`);
+					if (!this.webSocketServerManager.sendToClientByNickname(originalSenderNick, responseMsg)) {
+						console.warn(`[${this.manifest.name}] Cannot relay ${responseMsg.type}: Original sender ${originalSenderNick} not found.`);
+						// TODO: Maybe notify client who sent accept/decline that original sender is offline?
+					}
+				} else {
+					console.warn(`[${this.manifest.name}] Cannot relay ${responseMsg.type}: Original sender not specified in message from ${clientNickname}.`, responseMsg);
+				}
+				break;
+			}
+			// TODO: Handle file chunks ('fileChunk' type?) - receive chunk from client, relay to intended recipient(s)
+			// case 'fileChunk': { ... }
+			default:
+				console.warn(`[${this.manifest.name}] Received unhandled message type from client ${clientNickname}:`, message.type);
 		}
 	}
 
-	private handleFileTransferStart(fileId: string, direction: 'upload' | 'download', totalSize: number): void {
-		console.log(`[${this.manifest.name}] Transfer started: ${fileId} (${direction}), Size: ${totalSize}`);
-		this.chatView?.updateFileProgress?.(fileId, direction, 0, totalSize, 'starting');
-	}
-
-	private handleFileTransferProgress(fileId: string, direction: 'upload' | 'download', transferredBytes: number, totalSize: number): void {
-		this.chatView?.updateFileProgress?.(fileId, direction, transferredBytes, totalSize, 'progressing');
-	}
-
-	private handleFileTransferComplete(fileId: string, direction: 'upload' | 'download', filePath: string | null): void {
-		const offer = direction === 'download' ? this.incomingFileOffers.get(fileId) : this.outgoingFileOffers.get(fileId);
-		const filename = offer?.filename || (filePath ? path.basename(filePath) : 'file');
-		const offerSize = offer?.size || 0;
-
-		const message = direction === 'download' ? `File '${filename}' received.` : `File '${filename}' sent.`;
-		console.log(`[${this.manifest.name}] ${message} (ID: ${fileId})`);
-		new Notice(message, 4000); // Show notice for 4 seconds
-
-		if (direction === 'download') this.incomingFileOffers.delete(fileId);
-		if (direction === 'upload') this.outgoingFileOffers.delete(fileId);
-		this.chatView?.updateFileProgress?.(fileId, direction, offerSize, offerSize, 'completed');
-	}
-
-	private handleFileTransferError(fileId: string, direction: 'upload' | 'download', error: Error): void {
-		console.error(`[${this.manifest.name}] File transfer error: ${fileId} (${direction})`, error);
-		const offer = (direction === 'upload') ? this.outgoingFileOffers.get(fileId) : this.incomingFileOffers.get(fileId);
-		const filename = offer?.filename || 'file';
-		new Notice(`Error transferring file '${filename}': ${error.message}`, 5000); // Show error longer
-
-		if (direction === 'upload') this.outgoingFileOffers.delete(fileId);
-		if (direction === 'download') this.incomingFileOffers.delete(fileId);
-		this.chatView?.updateFileProgress?.(fileId, direction, 0, 0, 'error');
-	}
+	// --- User List Management ---
 
 	private handleUserFound(userInfo: UserInfo): void {
-		console.log(`[${this.manifest.name}] User Found: ${userInfo.nickname} (${userInfo.ip}:${userInfo.port})`);
-		this.chatView?.addUserToList(userInfo);
-		// TODO: Request history from new user or send welcome?
+		// Add/Update user in local map
+		this.knownUsers.set(userInfo.nickname, userInfo);
+		// Update UI list
+		this.chatView?.addUserToList(userInfo); // Expects UserInfo { nickname }
+
+		// If WE are the server, broadcast userJoin to others (except the new user)
+		if (this.settings.role === 'server' && this.webSocketServerManager && userInfo.nickname !== this.settings.userNickname) {
+			const joinPayload: UserJoinMessage = {
+				type: 'userJoin',
+				nickname: userInfo.nickname,
+				timestamp: Date.now() // Add timestamp
+			};
+			// Find client ID to exclude them from broadcast
+			const clientIdToExclude = this.webSocketServerManager.findClientIdByNickname(userInfo.nickname);
+			this.webSocketServerManager.broadcast(clientIdToExclude, joinPayload);
+		}
 	}
 
 	private handleUserLeft(userInfo: { nickname: string }): void {
-		console.log(`[${this.manifest.name}] User Left: ${userInfo.nickname}`);
-		this.chatView?.removeUserFromList(userInfo.nickname);
+		if (this.knownUsers.delete(userInfo.nickname)) {
+			console.log(`[${this.manifest.name}] User Left: ${userInfo.nickname}`);
+			this.chatView?.removeUserFromList(userInfo.nickname);
+			// If WE are the server, broadcast userLeave to everyone else
+			if (this.settings.role === 'server' && this.webSocketServerManager) {
+				const leavePayload: UserLeaveMessage = {
+					type: 'userLeave',
+					nickname: userInfo.nickname,
+					timestamp: Date.now() // Add timestamp
+				};
+				this.webSocketServerManager.broadcast(null, leavePayload); // null clientId = send to all
+			}
+		}
+	}
+
+	public getAllUsers(): UserInfo[] {
+		return Array.from(this.knownUsers.values());
 	}
 
 	// --- Public Methods (API for ChatView) ---
 
-	/** Sends a text message */
 	async sendMessage(recipientNickname: string | null, message: string): Promise<void> {
 		const senderNickname = this.settings.userNickname;
-		const timestamp = Date.now();
 		if (!message?.trim()) return;
 		const trimmedMessage = message.trim();
+		const timestamp = Date.now();
 
-		// Display & Save locally first
 		this.chatView?.displayMessage(senderNickname, trimmedMessage, timestamp, true);
-		// TODO: Save to history -> { ..., status: 'sending' }
+		// TODO: Save history -> { ..., status: 'sending' }
 
-		// Check prerequisites
-		if (!this.networkManager) { new Notice("Network Error: Service not active."); /* TODO: update history status */ return; }
-		if (recipientNickname !== null && !this.userDiscovery) { new Notice("Discovery Error: Cannot send private message."); /* TODO: update history status */ return; }
-
-		const nm = this.networkManager;
-		const ud = this.userDiscovery;
-		const payload = { type: 'text', senderNickname, content: trimmedMessage, timestamp };
+		const payload: TextMessage = { type: 'text', senderNickname, content: trimmedMessage, timestamp, recipient: recipientNickname };
 		let noticeMessage: string | null = null;
-		let failedSends = 0;
 
 		try {
-			if (recipientNickname === null) { // Broadcast
-				const recipients = ud ? ud.getAllUsers().filter((user) => user.nickname !== senderNickname) : [];
-				if (recipients.length === 0) { console.log(`[${this.manifest.name}] No users for broadcast.`); return; }
-
-				const results = await Promise.allSettled(
-					recipients.map((user) => nm.sendData(user.ip, user.port, payload).catch(err => Promise.reject({ nickname: user.nickname, error: err })))
-				);
-				failedSends = results.filter(r => r.status === 'rejected').length;
-				if (failedSends > 0) {
-					console.warn(`[${this.manifest.name}] Failed broadcast to ${failedSends} user(s).`);
-					noticeMessage = `Message sent, but failed for ${failedSends} user(s).`;
-				} else console.log(`[${this.manifest.name}] Broadcast message initiated for ${recipients.length} users.`);
-				// TODO: Update history status (sent/delivered/failed per user?)
-
-			} else { // Private
-				const recipientInfo = ud ? ud.getUserInfo(recipientNickname) : null;
-				if (!recipientInfo) throw new Error(`User ${recipientNickname} not found.`);
-				await nm.sendData(recipientInfo.ip, recipientInfo.port, payload);
-				console.log(`[${this.manifest.name}] Private message sent to ${recipientNickname}.`);
-				// TODO: Update history status (sent/delivered)
+			if (this.settings.role === 'client' && this.webSocketClientManager) {
+				await this.webSocketClientManager.sendMessage(payload);
+				// TODO: Update history status? ('sent')
+			} else if (this.settings.role === 'server' && this.webSocketServerManager) {
+				this.webSocketServerManager.handleLocalMessage(payload, recipientNickname);
+				// TODO: Update history status? ('sent'/'delivered' handled locally)
+			} else {
+				throw new Error("Chat service not configured or active.");
 			}
 		} catch (error: any) {
 			console.error(`[${this.manifest.name}] Error sending message:`, error);
-			noticeMessage = `Error sending message: ${error.message}`;
-			// TODO: Update history status (failed)
+			noticeMessage = `Send Error: ${error.message}`;
+			// TODO: Update history status ('failed')
 		}
 		if (noticeMessage) new Notice(noticeMessage);
 	}
 
-	/** Initiates sending a file selected by the user */
-	async initiateSendFile(file: File, recipientNickname: string | null): Promise<void> {
-		if (!this.networkManager) { new Notice("Network service not ready."); return; }
-		if (recipientNickname !== null && !this.userDiscovery) { new Notice("User discovery not ready."); return; }
+	// --- File Transfer Methods (Need complete rewrite for WebSockets) ---
 
+	/** Initiates sending a file selected by the user - NEEDS WS REWRITE */
+	/**
+	 * Initiates the process of sending a file selected by the user.
+	 * Stores offer details, updates local UI, and sends a 'fileOffer' message via WebSocket.
+	 * @param file The File object selected by the user.
+	 * @param recipientNickname Target user's nickname, or null for broadcast.
+	 */
+	async initiateSendFile(file: File, recipientNickname: string | null): Promise<void> {
+		const pluginName = `[${this.manifest.name}]`; // For logging
+
+		// 1. --- Prerequisite Checks ---
+		const isActiveManager = this.settings.role === 'client' ? this.webSocketClientManager : this.webSocketServerManager;
+		if (!isActiveManager) {
+			new Notice("Chat service is not ready to send files.");
+			console.error(`${pluginName} initiateSendFile: No active WebSocket manager.`);
+			return;
+		}
+		// Check UserDiscovery only if sending a private message/offer
+		// if (recipientNickname !== null && !this.userDiscover) {
+		if (recipientNickname !== null) {
+
+			new Notice("User discovery service not ready for private file offer.");
+			console.warn(`${pluginName} initiateSendFile: UserDiscovery needed for private offer to ${recipientNickname}`);
+			return;
+		}
+
+		// 2. --- Gather File Information ---
 		const fileId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 		const filename = file.name;
 		const size = file.size;
 
-		// --- CRITICAL TODO: Implement reliable filePath retrieval ---
-		// This placeholder WILL NOT WORK in a real scenario.
-		// Suggestion: Copy the file to plugin's data dir using vault adapter's writeBinary
-		// and use the path to the copy. This requires careful management of temporary files.
-		const filePath = (file as any).path || `PLACEHOLDER_PATH/${filename}`;
-		if (filePath.startsWith("PLACEHOLDER_PATH")) {
-			new Notice("Error: File path determination not implemented.", 10000); // Show longer
-			console.error("initiateSendFile: CRITICAL - File path determination needs implementation!");
+		// 3. --- CRITICAL: Determine File Path (Placeholder Logic) ---
+		// Retrieving a usable, persistent file path from a File object chosen via
+		// <input type="file"> is generally NOT possible in standard web/Electron contexts
+		// due to security restrictions. The '.path' property is non-standard.
+		//
+		// >> RECOMMENDED REAL IMPLEMENTATION STRATEGY: <<
+		// A) Copy File: Use `file.arrayBuffer()` then `app.vault.adapter.writeBinary()`
+		//    to save a copy to a temporary location (e.g., plugin data folder, vault temp).
+		//    Store the path to THIS COPY in `filePath`. Manage cleanup of temp files.
+		// B) Read Immediately: Read the file content into an ArrayBuffer here and store IT
+		//    in the offer state (instead of filePath). This might consume significant memory.
+		//
+		// Using the placeholder below WILL LIKELY FAIL during the actual upload step.
+		const filePath = (file as any).path; // Non-standard, likely undefined or unreliable!
+
+		if (!filePath || typeof filePath !== 'string') {
+			const errorMsg = "Error: Could not determine file path. File sending may require copying the file first (feature not fully implemented).";
+			new Notice(errorMsg, 10000);
+			console.error(`${pluginName} initiateSendFile: Failed to determine file path for '${filename}'. '.path' property is unreliable.`);
+			// Do not proceed without a path (or alternative data handling)
 			return;
 		}
-		// ------------------------------------------------------------
+		console.warn(`${pluginName} initiateSendFile: Using potentially unreliable file path: ${filePath}`); // Warn about placeholder
 
-		this.outgoingFileOffers.set(fileId, { fileId, filePath, filename, size, recipientNickname });
-		console.log(`[${this.manifest.name}] Initiating file send: ${filename} (ID: ${fileId})`);
-		this.chatView?.displayUploadProgress({ fileId, filename, size, recipientNickname }); // Show placeholder in UI
+		// 4. --- Store Offer State ---
+		const offerState: OutgoingFileOfferState = {
+			fileId,
+			filePath, // Store the obtained path (needs reliable source)
+			filename,
+			size,
+			recipientNickname
+		};
+		this.outgoingFileOffers.set(fileId, offerState);
+		console.log(`${pluginName} Stored outgoing file offer: ${filename} (ID: ${fileId})`);
 
-		const fileOfferPayload = { type: 'fileOffer', senderNickname: this.settings.userNickname, fileId, filename, size };
-		const nm = this.networkManager;
-		const ud = this.userDiscovery;
+		// 5. --- Update Local UI ---
+		// Show pending upload status in the chat view
+		this.chatView?.displayUploadProgress({ fileId, filename, size, recipientNickname });
+
+		// 6. --- Prepare and Send Network Offer ---
+		const fileOfferPayload: FileOfferMessage = {
+			type: 'fileOffer',
+			senderNickname: this.settings.userNickname,
+			fileId,
+			filename,
+			size,
+			recipient: recipientNickname, // Include recipient for server routing
+			timestamp: Date.now()
+		};
+
 		let noticeMessage: string | null = null;
-
 		try {
-			if (recipientNickname === null) { // Broadcast offer
-				const recipients = ud ? ud.getAllUsers().filter(u => u.nickname !== this.settings.userNickname) : [];
-				if (recipients.length === 0) throw new Error("No users found to send file offer.");
-				const sendPromises = recipients.map(user => nm.sendData(user.ip, user.port, fileOfferPayload).catch(err => console.warn(`Failed sending fileOffer broadcast to ${user.nickname}: ${err.message}`)));
-				await Promise.all(sendPromises);
-				console.log(`[${this.manifest.name}] File offer ${fileId} broadcasted.`);
-			} else { // Private offer
-				const userInfo = ud ? ud.getUserInfo(recipientNickname) : null;
-				if (!userInfo) throw new Error(`User ${recipientNickname} not found.`);
-				await nm.sendData(userInfo.ip, userInfo.port, fileOfferPayload);
-				console.log(`[${this.manifest.name}] File offer ${fileId} sent to ${recipientNickname}.`);
+			console.log(`${pluginName} Sending fileOffer ${fileId} (To: ${recipientNickname ?? 'broadcast'})...`);
+			if (this.settings.role === 'client') {
+				if (!this.webSocketClientManager) throw new Error("Client manager not available.");
+				await this.webSocketClientManager.sendMessage(fileOfferPayload);
+			} else { // Role is 'server'
+				if (!this.webSocketServerManager) throw new Error("Server manager not available.");
+				// Server handles sending its own offer via handleLocalMessage
+				this.webSocketServerManager.handleLocalMessage(fileOfferPayload, recipientNickname);
 			}
+			console.log(`${pluginName} File offer ${fileId} sent successfully.`);
+			// Now wait for 'fileAccept' or 'fileDecline' message
+
 		} catch (error: any) {
-			console.error(`[${this.manifest.name}] Error sending fileOffer for ${fileId}:`, error);
+			console.error(`${pluginName} Error sending fileOffer for ${fileId}:`, error);
 			noticeMessage = `Error sending file offer: ${error.message}`;
-			this.outgoingFileOffers.delete(fileId); // Clean up state
-			this.chatView?.updateFileProgress?.(fileId, 'upload', 0, size, 'error'); // Update UI
+			// Clean up failed offer state
+			this.outgoingFileOffers.delete(fileId);
+			// Update UI to show error
+			this.chatView?.updateFileProgress?.(fileId, 'upload', 0, size, 'error');
+		}
+
+		// Show notice if sending failed
+		if (noticeMessage) {
+			new Notice(noticeMessage);
+		}
+	}
+
+	/** Called by client UI to accept an offer */
+	async acceptFileOffer(senderNickname: string, fileId: string): Promise<void> {
+		const offer = this.incomingFileOffers.get(fileId);
+		if (!offer) { new Notice("Error: File offer not found or already handled."); return; }
+
+		console.log(`[${this.manifest.name}] Accepting file offer ${fileId} from ${senderNickname}`);
+
+		// 1. Update local UI immediately
+		this.chatView?.updateFileProgress?.(fileId, 'download', 0, offer.size, 'accepted'); // 'accepted' status
+
+		// 2. Prepare payload to send back
+		const payload: FileAcceptMessage = {
+			type: 'fileAccept',
+			senderNickname: this.settings.userNickname, // We are the one accepting
+			fileId: fileId,
+			originalSender: senderNickname, // Tell server/client who the original offer was from
+			timestamp: Date.now()
+		};
+
+		// 3. Send accept message via network
+		let noticeMessage: string | null = null;
+		try {
+			if (this.settings.role === 'client' && this.webSocketClientManager) {
+				await this.webSocketClientManager.sendMessage(payload);
+			} else if (this.settings.role === 'server' && this.webSocketServerManager) {
+				// Server accepts an offer shown on its own UI -> tell the original sender
+				if (!this.webSocketServerManager.sendToClientByNickname(senderNickname, payload)) {
+					throw new Error(`Cannot send acceptance, user ${senderNickname} not found.`);
+				}
+			} else {
+				throw new Error("Chat service not configured or active.");
+			}
+			console.log(`[${this.manifest.name}] File acceptance for ${fileId} sent.`);
+			// TODO: Now prepare to receive binary data for this fileId!
+			// This involves setting up a buffer/stream associated with fileId
+			// possibly in NetworkManager or ClientManager/ServerManager's binary message handler
+		} catch (error: any) {
+			console.error(`[${this.manifest.name}] Error sending file acceptance for ${fileId}:`, error);
+			noticeMessage = `Error accepting file: ${error.message}`;
+			// Revert UI / cleanup state?
+			this.incomingFileOffers.delete(fileId); // Remove offer if accept failed to send
+			this.chatView?.updateFileProgress?.(fileId, 'download', 0, offer.size, 'error');
 		}
 		if (noticeMessage) new Notice(noticeMessage);
 	}
 
-	/** Accepts an incoming file offer received previously */
-	async acceptFileOffer(senderNickname: string, fileId: string): Promise<void> {
-		if (!this.networkManager) { new Notice("Network service not ready."); return; }
-		const offer = this.incomingFileOffers.get(fileId);
-		if (!offer) { new Notice("Error: File offer not found or already handled."); return; }
-
-		let senderInfo: UserInfo | null = this.userDiscovery?.getUserInfo(senderNickname) || null;
-		if (!senderInfo && offer.senderAddress) { // Fallback to stored address
-			const parts = offer.senderAddress.split(':');
-			if (parts.length === 2) { const port = parseInt(parts[1]); if (parts[0] && !isNaN(port)) senderInfo = { nickname: senderNickname, ip: parts[0], port }; }
-		}
-		if (!senderInfo) { new Notice(`Error: Cannot find address for sender ${senderNickname}.`); return; }
-
-		try {
-			const savePath = await this.determineSavePath(offer.filename);
-			console.log(`[${this.manifest.name}] Accepting file ${fileId}. Save path: ${savePath}`);
-			await this.networkManager.prepareToReceiveFile(fileId, savePath, offer.size, `${senderNickname} (${senderInfo!.ip}:${senderInfo!.port})`);
-			const payload = { type: 'fileAccept', receiverNickname: this.settings.userNickname, fileId };
-			await this.networkManager.sendData(senderInfo!.ip, senderInfo!.port, payload);
-			console.log(`[${this.manifest.name}] Acceptance for ${fileId} sent. Waiting for data...`);
-		} catch (error: any) {
-			console.error(`[${this.manifest.name}] Error accepting file ${fileId}:`, error);
-			new Notice(`Error accepting file: ${error.message}`);
-			if (this.networkManager && (this.networkManager as any)['receivingFiles']?.has(fileId)) { (this.networkManager as any)['_cleanupReceivingFile'](fileId, error); }
-			this.incomingFileOffers.delete(fileId);
-			this.chatView?.updateFileProgress?.(fileId, 'download', 0, offer.size, 'error');
-		}
-	}
-
-	/** Declines an incoming file offer */
+	/** Called by client UI to decline an offer */
 	async declineFileOffer(senderNickname: string, fileId: string): Promise<void> {
-		if (!this.networkManager) { console.error("NM not ready"); return; } // No notice, user action
 		const offer = this.incomingFileOffers.get(fileId);
 		if (!offer) { this.chatView?.updateFileProgress?.(fileId, 'download', 0, 0, 'declined'); return; } // Already handled
 
-		let senderInfo: UserInfo | null = this.userDiscovery?.getUserInfo(senderNickname) || null;
-		if (!senderInfo && offer.senderAddress) { // Fallback
-			const parts = offer.senderAddress.split(':');
-			if (parts.length === 2) { const port = parseInt(parts[1]); if (parts[0] && !isNaN(port)) senderInfo = { nickname: senderNickname, ip: parts[0], port }; }
+		console.log(`[${this.manifest.name}] Declining file offer ${fileId} from ${senderNickname}`);
+
+		// Update UI immediately
+		this.incomingFileOffers.delete(fileId); // Remove locally first
+		this.chatView?.updateFileProgress?.(fileId, 'download', 0, offer.size || 0, 'declined');
+
+		// Prepare decline message
+		const payload: FileDeclineMessage = {
+			type: 'fileDecline',
+			senderNickname: this.settings.userNickname, // We are declining
+			fileId: fileId,
+			originalSender: senderNickname,
+			timestamp: Date.now()
+		};
+
+		// Try to send decline message (best effort)
+		try {
+			if (this.settings.role === 'client' && this.webSocketClientManager) {
+				await this.webSocketClientManager.sendMessage(payload);
+			} else if (this.settings.role === 'server' && this.webSocketServerManager) {
+				if (!this.webSocketServerManager.sendToClientByNickname(senderNickname, payload)) {
+					console.warn(`[${this.manifest.name}] Cannot send decline, user ${senderNickname} not found.`);
+				}
+			} else {
+				// Service not ready, but we declined locally anyway
+			}
+			console.log(`[${this.manifest.name}] Decline message for ${fileId} sent (or attempted).`);
+		} catch (error: any) {
+			console.warn(`[${this.manifest.name}] Error sending file decline for ${fileId}: ${error.message}`);
+			// No notice to user, they already see the decline in UI
+		}
+	}
+
+
+
+	/** This method is called by handleServerMessage when a remote user declines OUR file offer */
+	private handleRemoteFileDecline(fileId: string, remoteUserNickname: string): void {
+		const offer = this.outgoingFileOffers.get(fileId);
+		if (offer) {
+			console.log(`[${this.manifest.name}] User ${remoteUserNickname} declined file ${offer.filename} (ID: ${fileId})`);
+			new Notice(`User ${remoteUserNickname} declined file: ${offer.filename}`);
+			this.outgoingFileOffers.delete(fileId);
+			this.chatView?.updateFileProgress?.(fileId, 'upload', 0, offer.size || 0, 'declined');
+		} else {
+			console.warn(`[${this.manifest.name}] Received remote fileDecline for unknown outgoing offer ID: ${fileId}`);
+		}
+	}
+	/**
+		* Обробляє ситуацію, коли віддалений користувач прийняв НАШУ пропозицію файлу.
+		* Запускає процес читання файлу та надсилання його частин через WebSocket.
+		* @param fileId Ідентифікатор файлу, пропозицію якого прийняли.
+		* @param remoteUserNickname Нікнейм користувача, який прийняв пропозицію.
+		*/
+	private async handleRemoteFileAccept(fileId: string, remoteUserNickname: string): Promise<void> {
+		const offer = this.outgoingFileOffers.get(fileId);
+		if (!offer) {
+			console.warn(`[${this.manifest.name}] Received acceptance for unknown outgoing offer ${fileId}`);
+			return;
 		}
 
-		if (senderInfo) {
-			const payload = { type: 'fileDecline', receiverNickname: this.settings.userNickname, fileId };
-			// Send decline message, but don't wait or error out if it fails
-			this.networkManager.sendData(senderInfo!.ip, senderInfo!.port, payload)
-				.then(() => console.log(`[${this.manifest.name}] Decline message for ${fileId} sent.`))
-				.catch(error => console.warn(`[${this.manifest.name}] Failed sending decline message for ${fileId}: ${error.message}`));
-		} else {
-			console.warn(`[${this.manifest.name}] Sender ${senderNickname} not found, cannot send decline for ${fileId}.`);
+		console.log(`[${this.manifest.name}] User ${remoteUserNickname} accepted file ${offer.filename} (ID: ${fileId}). Preparing upload...`);
+
+		// 1. Перевірка доступності файлу за шляхом filePath
+		// ВИДАЛЯЄМО перевірку offer.fileObject
+		// Перевіряємо offer.filePath за допомогою адаптера
+		const fileExists = await this.adapterFileExists(offer.filePath);
+
+		if (!fileExists) {
+			console.error(`[${this.manifest.name}] Cannot start upload for ${fileId}: File not accessible at path: ${offer.filePath}.`);
+			console.error(`Reminder: The method to obtain 'filePath' in 'initiateSendFile' needs a proper implementation (e.g., copying the file).`);
+			new Notice(`Error starting upload: Cannot access file ${offer.filename}`);
+			// Повідомляємо UI про помилку та очищаємо стан
+			this.outgoingFileOffers.delete(fileId);
+			this.chatView?.updateFileProgress?.(fileId, 'upload', 0, offer.size, 'error');
+			// TODO: Можливо, варто надіслати повідомлення про помилку користувачу, який прийняв пропозицію?
+			return;
 		}
-		// Always cleanup locally and update UI immediately
-		this.incomingFileOffers.delete(fileId);
-		this.chatView?.updateFileProgress?.(fileId, 'download', 0, offer.size || 0, 'declined');
+
+		// 2. Файл доступний, оновлюємо UI і готуємось до надсилання
+		this.chatView?.updateFileProgress?.(fileId, 'upload', 0, offer.size, 'starting'); // Статус початку надсилання
+
+		// --- КРИТИЧНЕ TODO: Реалізувати читання файлу та надсилання через WebSocket ---
+		console.error("<<<<< FILE UPLOAD STREAMING VIA WEBSOCKET IS NOT IMPLEMENTED >>>>>");
+		new Notice(`File upload streaming for ${offer.filename} not implemented yet.`);
+		// Тут має бути логіка:
+		// - Створити ReadStream для offer.filePath (використовуючи Node.js 'fs' на десктопі).
+		// - Читати файл частинами (chunks).
+		// - Для кожного chunk:
+		//   - Формувати бінарне повідомлення WebSocket (можливо, з метаданими: fileId, chunkIndex, isLast).
+		//   - Надсилати через активний WebSocket менеджер (клієнтський або серверний для ретрансляції).
+		//   - Оновлювати UI прогресу через this.handleFileTransferProgress.
+		// - Обробляти завершення потоку (надіслати фінальне повідомлення).
+		// - Обробляти помилки читання потоку.
+
+		// Тимчасово симулюємо помилку, оскільки функціонал не реалізовано:
+		setTimeout(() => {
+			console.warn(`[${this.manifest.name}] Placeholder: Simulating error for unimplemented upload of ${fileId}`);
+			this.handleFileTransferError(fileId, 'upload', new Error("File upload streaming not implemented"));
+		}, 1500);
+	}
+
+	// --- Обробник повідомлення типу 'fileAccept' від сервера/клієнта ---
+	// Цей метод викликає handleRemoteFileAccept
+	// Потрібно переконатися, що він передає правильні параметри
+	private handleFileAcceptReceived(
+		senderInfo: { clientId?: string | null, nickname: string }, // Отримуємо нік того, ХТО ПРИЙНЯВ
+		message: FileAcceptMessage // Повідомлення містить fileId та originalSender (той, ХТО НАДСИЛАВ ПРОПОЗИЦІЮ)
+	): void {
+		// Переконуємось, що ми є тим, хто надсилав пропозицію
+		if (message.originalSender === this.settings.userNickname) {
+			console.log(`[${this.manifest.name}] Handling fileAccept message from ${senderInfo.nickname} for our offer ${message.fileId}`);
+			// Викликаємо метод, який почне завантаження файлу
+			// Передаємо fileId і нік того, хто прийняв (remoteUserNickname)
+			this.handleRemoteFileAccept(message.fileId, senderInfo.nickname);
+		} else {
+			// Це прийняття пропозиції, яку надсилав хтось інший (сервер переслав нам помилково?)
+			console.warn(`[${this.manifest.name}] Received fileAccept message for an offer not originated by us. Original Sender: ${message.originalSender}, File ID: ${message.fileId}`);
+		}
+	}
+	/**
+	 * Обробляє помилку, що виникла під час передачі файлу (upload або download).
+	 * Викликається відповідним WebSocket менеджером.
+	 * @param fileId Ідентифікатор передачі файлу, де сталася помилка.
+	 * @param direction Напрямок передачі ('upload' або 'download').
+	 * @param error Об'єкт помилки.
+	 */
+	private handleFileTransferError(fileId: string, direction: 'upload' | 'download', error: Error): void {
+		console.error(`[${this.manifest.name}] File transfer error: ${fileId} (${direction})`, error);
+
+		// Спробуємо знайти інформацію про файл для більш інформативного повідомлення
+		const offer = (direction === 'upload')
+			? this.outgoingFileOffers.get(fileId)
+			: this.incomingFileOffers.get(fileId);
+		const filename = offer?.filename || 'файл'; // Використовуємо назву з пропозиції або заглушку
+
+		// Показуємо повідомлення користувачу
+		new Notice(`Помилка передачі файлу '${filename}': ${error.message}`, 7000); // Показуємо довше
+
+		// Очищуємо стан для цієї передачі файлу
+		if (direction === 'upload') {
+			this.outgoingFileOffers.delete(fileId);
+		} else { // direction === 'download'
+			this.incomingFileOffers.delete(fileId);
+		}
+
+		// Оновлюємо UI, щоб показати статус помилки
+		// Передаємо 0/0 для байтів/розміру, оскільки передача не завершена
+		this.chatView?.updateFileProgress?.(fileId, direction, 0, 0, 'error');
 	}
 
 	// --- Settings Management ---
@@ -446,60 +722,40 @@ export default class LocalChatPlugin extends Plugin {
 
 	async saveSettings() {
 		await this.saveData(this.settings);
-		// TODO: Notify NetworkManager/UserDiscovery if nickname/port changed and handle restart/update logic
 		console.log(`[${this.manifest.name}] Settings saved.`);
+		// TODO: Handle role/address/port changes - this currently requires an Obsidian restart
+		// A Notice is added in SettingsTab to inform the user.
 	}
 
-	// У файлі main.ts всередині класу LocalChatPlugin
-
-	// У файлі main.ts всередині класу LocalChatPlugin
-
+	// Last version of activateView provided
 	async activateView() {
 		const { workspace } = this.app;
-		let leafToReveal: WorkspaceLeaf | null = null; // Використовуємо нове ім'я для ясності
+		let leafToReveal: WorkspaceLeaf | null = null; // Initialized as potentially null
 
-		// 1. Шукаємо існуючу панель нашого типу
 		const existingLeaves = workspace.getLeavesOfType(CHAT_VIEW_TYPE);
 		if (existingLeaves.length > 0) {
-			leafToReveal = existingLeaves[0]; // Знайшли існуючу
-			console.log(`[${this.manifest.name}] activateView: Revealing existing leaf.`);
+			leafToReveal = existingLeaves[0]; // Assigned non-null WorkspaceLeaf
 		} else {
-			// 2. Якщо існуючої немає, створюємо нову
-			console.log(`[${this.manifest.name}] activateView: Creating new leaf.`);
-			// Намагаємось створити праворуч
-			let newLeaf = workspace.getRightLeaf(false);
-			if (!newLeaf) {
-				// Якщо праворуч не вийшло, намагаємось ліворуч
-				console.log(`[${this.manifest.name}] activateView: Could not get right leaf, trying left.`);
-				newLeaf = workspace.getLeftLeaf(false);
-			}
-
-			// Перевіряємо, чи вдалося створити панель (ліворуч або праворуч)
-			if (newLeaf) {
-				leafToReveal = newLeaf; // Запам'ятовуємо створену панель
+			// Try to create new leaf
+			let newLeaf = workspace.getRightLeaf(false) ?? workspace.getLeftLeaf(false); // Result is WorkspaceLeaf | null
+			if (newLeaf) { // Check if leaf was created
+				leafToReveal = newLeaf; // Assigned non-null WorkspaceLeaf
 				await leafToReveal.setViewState({ type: CHAT_VIEW_TYPE, active: true });
-				console.log(`[${this.manifest.name}] activateView: New leaf created and view state set.`);
 			} else {
-				// Якщо не вдалося створити ніде
-				console.error(`[${this.manifest.name}] activateView: Failed to get leaf for new view.`);
-				new Notice("Error: Could not open chat panel.");
-				return; // Виходимо з функції, бо панелі немає
+				// Could not create leaf
+				console.error("Could not get a side leaf.");
+				new Notice("Error opening chat panel.");
+				return; // Exit function
 			}
 		}
 
-		// 3. Переконуємось, що маємо панель, та активуємо її
-		// Додаємо явну перевірку на null перед revealLeaf
-		if (leafToReveal) {
-			workspace.revealLeaf(leafToReveal); // Тепер TypeScript впевнений, що leafToReveal не null
+		// Final check before revealing
+		if (leafToReveal) { // Explicit null check
+			workspace.revealLeaf(leafToReveal); // Inside check, leafToReveal is WorkspaceLeaf
 		} else {
-			// Цей блок не мав би виконатись через return вище, але про всяк випадок
-			console.error(`[${this.manifest.name}] activateView: leafToReveal is unexpectedly null before revealLeaf.`);
+			console.error(`Logic error in activateView: leafToReveal is unexpectedly null.`);
 		}
 	}
-
-	// ... (решта коду класу LocalChatPlugin) ...
-
-	// ... (решта коду класу LocalChatPlugin) ...
 
 	// --- Helpers ---
 	private isChatViewActive(): boolean {
@@ -507,56 +763,50 @@ export default class LocalChatPlugin extends Plugin {
 		return !!activeLeaf && activeLeaf.getViewState().type === CHAT_VIEW_TYPE;
 	}
 
+	/** Determines absolute path for saving, handling conflicts and default folders */
 	private async determineSavePath(filename: string): Promise<string> {
 		let downloadDir = this.settings.downloadPath?.trim() || '';
-		let useDefaultAttachmentFolder = false;
 
+		// Use default attachment folder if downloadPath is empty
 		if (!downloadDir) {
-			useDefaultAttachmentFolder = true;
 			try {
-				// Using undocumented getConfig - safer inside try-catch
-				const attachmentPath = (this.app.vault as any).getConfig('attachmentFolderPath');
-				if (attachmentPath && typeof attachmentPath === 'string') {
-					downloadDir = attachmentPath.startsWith('/') ? attachmentPath.substring(1) : attachmentPath;
-				} else { downloadDir = ''; }
-			} catch (e) { downloadDir = ''; }
+				const attachmentPathSetting = (this.app.vault as any).getConfig('attachmentFolderPath');
+				if (attachmentPathSetting && typeof attachmentPathSetting === 'string') {
+					downloadDir = attachmentPathSetting.startsWith('/') ? attachmentPathSetting.substring(1) : attachmentPathSetting;
+				} else { downloadDir = ''; } // Fallback to vault root if setting invalid/missing
+			} catch (e) {
+				console.warn(`[${this.manifest.name}] Error reading attachment folder setting, using vault root.`, e);
+				downloadDir = '';
+			}
 		}
 
 		// Ensure download directory exists relative to vault root
 		try {
 			const abstractFile = this.app.vault.getAbstractFileByPath(downloadDir);
-			// ЗАМІНІТЬ 'Folder' НА 'TFolder' В ЦЬОМУ РЯДКУ:
-			if (abstractFile && !(abstractFile instanceof TFolder)) {
-				console.warn(`[<span class="math-inline">\{this\.manifest\.name\}\] Specified download path '</span>{downloadDir}' exists but is not a folder. Using vault root.`);
-				downloadDir = ''; // Fallback to root if path is not a folder
-			} else if (!abstractFile) {
-				console.log(`[${this.manifest.name}] Creating download directory: ${downloadDir}`);
-				// Перевіряємо чи шлях не порожній перед створенням
-				if (downloadDir) {
-					await this.app.vault.createFolder(downloadDir);
-				} else {
-					// Якщо downloadDir порожній (корінь сховища), нічого не створюємо
-					console.log(`[${this.manifest.name}] Download path is vault root, no need to create folder.`);
-				}
+			if (abstractFile && !(abstractFile instanceof TFolder)) { // Use TFolder
+				console.warn(`[${this.manifest.name}] Download path '${downloadDir}' is not a folder. Using vault root.`);
+				downloadDir = '';
+			} else if (!abstractFile && downloadDir) { // Only create if not vault root
+				await this.app.vault.createFolder(downloadDir);
 			}
-			// Якщо abstractFile існує і є TFolder, нічого не робимо - папка вже існує
 		} catch (err) {
-			console.error(`[<span class="math-inline">\{this\.manifest\.name\}\] Error ensuring download directory '</span>{downloadDir}' exists, using vault root.`, err);
-			downloadDir = ''; // Fallback to root on error
+			console.error(`[${this.manifest.name}] Error ensuring download directory '${downloadDir}' exists. Using vault root.`, err);
+			downloadDir = '';
 		}
 
-		// Get absolute base path using adapter (undocumented)
+		// Get absolute base path using adapter (use check for getBasePath)
 		const adapter = this.app.vault.adapter as any;
-		if (typeof adapter.getBasePath !== 'function') { throw new Error("Cannot determine vault base path via adapter."); }
-		const vaultBasePath = adapter.getBasePath();
-		const absoluteDir = path.join(vaultBasePath, downloadDir);
+		if (typeof adapter.getBasePath !== 'function') {
+			throw new Error("Cannot determine vault base path via adapter.");
+		}
+		const absoluteDir = path.join(adapter.getBasePath(), downloadDir);
 
 		// Handle filename conflicts reliably
 		let counter = 0;
 		const sanitizedOriginalName = this.sanitizeFilename(filename);
 		let finalFilename = sanitizedOriginalName;
 		let savePath = path.join(absoluteDir, finalFilename);
-		const maxAttempts = 100; // Safety limit
+		const maxAttempts = 100;
 
 		while (await this.adapterFileExists(savePath) && counter < maxAttempts) {
 			counter++;
@@ -565,130 +815,37 @@ export default class LocalChatPlugin extends Plugin {
 			finalFilename = `${baseName} (${counter})${extension}`;
 			savePath = path.join(absoluteDir, finalFilename);
 		}
-
-		if (counter >= maxAttempts) { throw new Error(`Failed to find unique filename for ${filename} after ${maxAttempts} attempts.`); }
+		if (counter >= maxAttempts) throw new Error(`Failed to find unique filename for ${filename}`);
 		console.log(`[${this.manifest.name}] Determined save path: ${savePath}`);
 		return savePath;
 	}
 
-	// Helper to check file existence using Obsidian adapter
+	// Helper uses adapter stat for potentially better reliability within Obsidian
 	private async adapterFileExists(absolutePath: string): Promise<boolean> {
 		try {
 			const adapter = this.app.vault.adapter as any;
 			if (typeof adapter.getBasePath !== 'function' || typeof adapter.stat !== 'function') {
-				// Fallback if adapter methods are missing
+				console.warn("[adapterFileExists] Adapter missing required methods, falling back to fs.existsSync");
 				return fs.existsSync(absolutePath);
 			}
 			const vaultBasePath = adapter.getBasePath();
-			const vaultRelativePath = path.relative(vaultBasePath, absolutePath).replace(/\\/g, '/'); // Use forward slashes for Obsidian API
+			const vaultRelativePath = path.relative(vaultBasePath, absolutePath).replace(/\\/g, '/'); // Use forward slashes
 
 			if (!vaultRelativePath || vaultRelativePath.startsWith('..')) {
-				console.warn(`[${this.manifest.name}] Calculated relative path is outside vault: ${vaultRelativePath}. Checking with fs.existsSync.`);
-				return fs.existsSync(absolutePath); // Fallback if path seems outside vault
+				// Path seems outside vault, fs.existsSync might be more appropriate? Or just return false?
+				console.warn(`[adapterFileExists] Path outside vault? ${vaultRelativePath}. Using fs.existsSync.`);
+				return fs.existsSync(absolutePath);
 			}
-
-			const stats = await adapter.stat(vaultRelativePath);
-			return !!stats; // Exists if stat doesn't error and returns stats
-		} catch (e: any) {
-			// stat throws error if not found, check error code if possible (though unreliable across adapters)
-			// console.debug(`Adapter stat error for ${absolutePath}: ${e.message}`);
-			return false;
-		}
+			return !!(await adapter.stat(vaultRelativePath));
+		} catch (e) { return false; } // stat throws error if not found
 	}
 
 	private sanitizeFilename(filename: string): string {
-		// Remove characters forbidden in Windows/macOS/Linux filenames & reserved names
 		const forbiddenChars = /[<>:"/\\|?*\x00-\x1F]/g;
 		const reservedNames = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$/i;
 		let sanitized = filename.replace(forbiddenChars, '_');
-		if (reservedNames.test(sanitized)) {
-			sanitized = `_${sanitized}`;
-		}
-		return sanitized.trim() || "downloaded_file"; // Ensure not empty
+		if (reservedNames.test(sanitized)) sanitized = `_${sanitized}`;
+		return (sanitized.trim() || "downloaded_file").substring(0, 200); // Add length limit
 	}
 
-} // End of LocalChatPlugin class
-
-// --- Settings Tab Class ---
-// Included here for completeness, assuming it's in a separate file normally
-// and importing DEFAULT_SETTINGS and LocalChatPlugin
-// import { DEFAULT_SETTINGS } from './main'; // Assuming this file is main.ts
-
-class ChatSettingTab extends PluginSettingTab {
-	plugin: LocalChatPlugin;
-
-	constructor(app: App, plugin: LocalChatPlugin) {
-		super(app, plugin);
-		this.plugin = plugin;
-	}
-
-	display(): void {
-		const { containerEl } = this;
-		containerEl.empty();
-		containerEl.createEl('h2', { text: 'Local Chat Settings' });
-
-		// Nickname Setting
-		new Setting(containerEl)
-			.setName('Your Nickname')
-			.setDesc('How you will appear to others on the network.')
-			.addText(text => text
-				.setPlaceholder('Enter nickname')
-				.setValue(this.plugin.settings.userNickname)
-				.onChange(async (value) => {
-					this.plugin.settings.userNickname = value?.trim() || DEFAULT_SETTINGS.userNickname;
-					await this.plugin.saveSettings();
-					// TODO: Notify UserDiscovery about nickname change if it's running
-					// this.plugin.userDiscovery?.updateNickname?.(this.plugin.settings.userNickname);
-				}));
-
-		// Port Setting
-		new Setting(containerEl)
-			.setName('Listening Port')
-			.setDesc('TCP port the plugin will use. Requires Obsidian restart to apply.')
-			.addText(text => text
-				.setPlaceholder(String(DEFAULT_SETTINGS.listenPort))
-				.setValue(String(this.plugin.settings.listenPort))
-				.onChange(async (value) => {
-					const port = parseInt(value);
-					let portChanged = false;
-					if (!isNaN(port) && port > 1024 && port < 65535) {
-						if (this.plugin.settings.listenPort !== port) {
-							this.plugin.settings.listenPort = port;
-							portChanged = true;
-						}
-					} else if (value !== String(this.plugin.settings.listenPort)) {
-						text.setValue(String(this.plugin.settings.listenPort));
-						new Notice("Invalid port. Enter a number between 1025 and 65534.");
-					}
-					if (portChanged) {
-						await this.plugin.saveSettings();
-						new Notice("Port changed. Restart Obsidian for the change to take effect.");
-					}
-				}));
-
-		// Download Path Setting
-		new Setting(containerEl)
-			.setName('Download Folder')
-			.setDesc('Where to save received files. Leave empty to use the vault attachment folder (relative to vault root).')
-			.addText(text => text
-				.setPlaceholder('e.g., ChatDownloads')
-				.setValue(this.plugin.settings.downloadPath)
-				.onChange(async (value) => {
-					this.plugin.settings.downloadPath = value?.trim() || '';
-					await this.plugin.saveSettings();
-				}));
-
-		// Save History Setting
-		new Setting(containerEl)
-			.setName('Save Chat History')
-			.setDesc('Whether to keep message history between Obsidian sessions.')
-			.addToggle(toggle => toggle
-				.setValue(this.plugin.settings.saveHistory)
-				.onChange(async (value) => {
-					this.plugin.settings.saveHistory = value;
-					await this.plugin.saveSettings();
-				}));
-
-		// TODO: Add "Clear History" button
-	}
 }

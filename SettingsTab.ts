@@ -1,8 +1,6 @@
-// Додайте ці імпорти на початку файлу SettingsTab.ts
-import { App, PluginSettingTab, Setting, Notice } from 'obsidian';
-import LocalChatPlugin, { DEFAULT_SETTINGS } from './main'; // Імпортуємо головний клас плагіну та налаштування за замовчуванням
-
-// Додайте 'export' перед оголошенням класу
+import { App, Notice, PluginSettingTab, Setting, Platform } from 'obsidian';
+import LocalChatPlugin from './main'; // Import main plugin class and defaults
+import { DEFAULT_SETTINGS, LocalChatPluginSettings } from './types';
 export class ChatSettingTab extends PluginSettingTab {
     plugin: LocalChatPlugin;
 
@@ -14,68 +12,138 @@ export class ChatSettingTab extends PluginSettingTab {
     display(): void {
         const { containerEl } = this;
         containerEl.empty();
-        containerEl.createEl('h2', { text: 'Налаштування Локального Чату' });
+        containerEl.createEl('h2', { text: 'Local Chat Settings' });
 
-        // Налаштування псевдоніму
+        // Role Setting
         new Setting(containerEl)
-            .setName('Ваш Псевдонім')
-            .setDesc('Як вас бачитимуть інші користувачі в мережі.')
+            .setName('Instance Role')
+            .setDesc('Client connects to a server. Server accepts connections (Desktop Only). Restart required.')
+            .addDropdown(dropdown => {
+                dropdown
+                    .addOption('client', 'Client')
+                    .addOption('server', 'Server')
+                    .setValue(this.plugin.settings.role)
+                    .onChange(async (value: 'client' | 'server') => {
+                        if (Platform.isMobile && value === 'server') {
+                            new Notice("Server role not supported on mobile.");
+                            dropdown.setValue('client'); // Revert
+                            return;
+                        }
+                        if (this.plugin.settings.role !== value) {
+                            this.plugin.settings.role = value;
+                            await this.plugin.saveSettings();
+                            this.display(); // Re-render
+                            new Notice("Role changed. Restart Obsidian for changes to take effect.", 7000);
+                        }
+                    });
+                if (Platform.isMobile) {
+                    const serverOption = dropdown.selectEl.querySelector('option[value="server"]');
+                    if (serverOption) (serverOption as HTMLOptionElement).disabled = true;
+                    // Ensure client is selected if mobile loaded with server role somehow
+                    if (this.plugin.settings.role === 'server') dropdown.setValue('client');
+                }
+            });
+
+        // Server Address Setting (Client role)
+        const serverAddrSetting = new Setting(containerEl)
+            .setName('Server Address')
+            .setDesc('WebSocket address (e.g., ws://192.168.1.100:61338)')
             .addText(text => text
-                .setPlaceholder('Введіть псевдонім')
-                .setValue(this.plugin.settings.userNickname)
+                .setPlaceholder(DEFAULT_SETTINGS.serverAddress)
+                .setValue(this.plugin.settings.serverAddress)
                 .onChange(async (value) => {
-                    // Використовуємо DEFAULT_SETTINGS для fallback, якщо значення порожнє
-                    this.plugin.settings.userNickname = value?.trim() || DEFAULT_SETTINGS.userNickname;
+                    this.plugin.settings.serverAddress = value?.trim() || DEFAULT_SETTINGS.serverAddress;
                     await this.plugin.saveSettings();
-                    // TODO: Можливо, потрібно повідомити UserDiscovery про зміну нікнейму
-                    // this.plugin.userDiscovery?.updateNickname(this.plugin.settings.userNickname);
                 }));
 
-        // Налаштування порту
-        new Setting(containerEl)
-            .setName('Порт для прослуховування')
-            .setDesc('TCP порт, який буде використовувати плагін. Потребує перезапуску Obsidian для застосування.')
+        // Server Port Setting (Server role)
+        const serverPortSetting = new Setting(containerEl)
+            .setName('Server Port')
+            .setDesc('Port for the server to listen on. Restart required.')
             .addText(text => text
-                .setPlaceholder(String(DEFAULT_SETTINGS.listenPort))
-                .setValue(String(this.plugin.settings.listenPort))
+                .setPlaceholder(String(DEFAULT_SETTINGS.serverPort))
+                .setValue(String(this.plugin.settings.serverPort))
                 .onChange(async (value) => {
                     const port = parseInt(value);
-                    let changed = false;
+                    let portChanged = false;
                     if (!isNaN(port) && port > 1024 && port < 65535) {
-                        if (this.plugin.settings.listenPort !== port) {
-                            this.plugin.settings.listenPort = port;
-                            changed = true;
+                        if (this.plugin.settings.serverPort !== port) {
+                            this.plugin.settings.serverPort = port;
+                            portChanged = true;
                         }
-                    } else {
-                        // Якщо некоректне значення, просто залишаємо поточне і нічого не зберігаємо
-                        // Можна вивести повідомлення про помилку
-                        text.setValue(String(this.plugin.settings.listenPort)); // Повертаємо старе значення в поле
-                        new Notice("Некоректний порт. Введіть число від 1025 до 65534.");
+                    } else if (value !== String(this.plugin.settings.serverPort)) {
+                        text.setValue(String(this.plugin.settings.serverPort));
+                        new Notice("Invalid port (1025-65534).");
                     }
-                    // Зберігаємо налаштування лише якщо порт змінився і валідний
-                    if (changed) {
+                    if (portChanged) {
                         await this.plugin.saveSettings();
-                        new Notice("Порт змінено. Перезапустіть Obsidian, щоб зміни вступили в силу.");
+                        new Notice("Server port changed. Restart Obsidian to apply.", 7000);
                     }
                 }));
 
-        // Налаштування шляху завантаження
+        // Show/Hide based on role
+        if (this.plugin.settings.role === 'server' && !Platform.isMobile) {
+            serverAddrSetting.settingEl.style.display = 'none';
+            serverPortSetting.settingEl.style.display = '';
+        } else { // Client or Mobile
+            serverAddrSetting.settingEl.style.display = '';
+            serverPortSetting.settingEl.style.display = 'none';
+        }
+
+        // Nickname Setting
         new Setting(containerEl)
-            .setName('Папка для завантажень')
-            .setDesc('Куди зберігати отримані файли. Залиште порожнім, щоб використовувати папку вкладень сховища.')
+            .setName('Your Nickname')
+            .setDesc('How you appear to others.')
             .addText(text => text
-                .setPlaceholder('Наприклад, Downloads/ObsidianChat')
-                .setValue(this.plugin.settings.downloadPath)
+                .setPlaceholder(DEFAULT_SETTINGS.userNickname)
+                .setValue(this.plugin.settings.userNickname)
                 .onChange(async (value) => {
-                    this.plugin.settings.downloadPath = value?.trim() || ''; // Зберігаємо порожній рядок, якщо очищено
-                    await this.plugin.saveSettings();
+                    const newNickname = value?.trim() || DEFAULT_SETTINGS.userNickname;
+                    if (this.plugin.settings.userNickname !== newNickname) {
+                        this.plugin.settings.userNickname = newNickname;
+                        await this.plugin.saveSettings();
+                        // TODO: If connected as client, send nickname update to server?
+                        // if (this.plugin.webSocketClientManager?.isConnected) { ... send update message ... }
+                        // If server, update own info and maybe broadcast? Requires more logic.
+                    }
                 }));
 
-
-        // Налаштування збереження історії
+        // Download Path Setting
         new Setting(containerEl)
-            .setName('Зберігати історію чату')
-            .setDesc('Чи зберігати повідомлення між сесіями Obsidian.')
+            .setName('Download Folder')
+            .setDesc('Relative to vault root. Leave empty for vault attachment folder.')
+            // Викликаємо addText і конфігуруємо текстове поле ('text') всередині callback
+            .addText(text => {
+                // --- Логіка для placeholder ---
+                let placeholder = 'Default: Vault attachment folder'; // Стандартний текст
+                try {
+                    // Намагаємося отримати реальний шлях (використовуючи workaround 'as any')
+                    const attachmentPath = (this.app.vault as any).getConfig('attachmentFolderPath');
+                    // Перевіряємо, чи отримали валідний рядок
+                    if (attachmentPath && typeof attachmentPath === 'string' && attachmentPath.trim()) {
+                        placeholder = attachmentPath.trim(); // Використовуємо отриманий шлях як підказку
+                    }
+                } catch (e) {
+                    console.warn("[Local Chat Settings] Could not read attachment folder path for placeholder:", e);
+                    // Ігноруємо помилку, залишаємо стандартний placeholder
+                }
+                // --- Кінець логіки для placeholder ---
+
+                // Ланцюжок методів тепер застосовується до 'text'
+                text
+                    .setPlaceholder(placeholder) // Встановлюємо підказку
+                    .setValue(this.plugin.settings.downloadPath) // <-- Перенесено сюди
+                    .onChange(async (value) => { // <-- Перенесено сюди
+                        // Зберігаємо значення (порожній рядок, якщо користувач все стер)
+                        this.plugin.settings.downloadPath = value?.trim() ?? ''; // Використовуємо ?? для ясності
+                        await this.plugin.saveSettings();
+                    });
+            }); // Кінець конфігурації addText
+
+        // Save History Setting
+        new Setting(containerEl)
+            .setName('Save Chat History')
+            .setDesc('Keep messages between sessions.')
             .addToggle(toggle => toggle
                 .setValue(this.plugin.settings.saveHistory)
                 .onChange(async (value) => {
@@ -83,22 +151,6 @@ export class ChatSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
-        // Кнопка очищення історії (якщо реалізовано)
-        /*
-        new Setting(containerEl)
-            .setName('Очистити історію')
-            .setDesc('Видаляє всі збережені повідомлення.')
-            .addButton(button => button
-                .setButtonText('Очистити')
-                .setWarning()
-                .onClick(async () => {
-                    if (confirm('Ви впевнені, що хочете видалити всю історію чату?')) {
-                        // await this.plugin.clearChatHistory(); // Потрібно реалізувати цей метод в main.ts
-                        new Notice('Історію чату очищено.');
-                    }
-                }));
-        */
+        // TODO: Add "Clear History" button
     }
 }
-
-// Додавати 'export {}' в кінці файлу НЕ потрібно, оскільки імпорти та експорт класу вже роблять його модулем.
