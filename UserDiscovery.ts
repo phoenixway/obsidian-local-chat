@@ -1,5 +1,6 @@
-import { Bonjour, Service, Browser, RemoteService } from 'bonjour-service';
+import { Bonjour, Service, Browser } from 'bonjour-service';
 import { UserInfo } from './main'; // Припускаємо, що інтерфейс UserInfo визначено в main.ts
+import * as net from 'net'; // Потрібно для _selectIpAddress
 
 // --- Інтерфейси ---
 
@@ -121,15 +122,14 @@ export class UserDiscovery {
             await new Promise<void>((resolve, reject) => {
                 console.log("[UserDiscovery] Calling unpublishAll...");
                 // unpublishAll викликає callback після завершення
-                bonjourInstance.unpublishAll((err) => { // Використовуємо збережене посилання
+                bonjourInstance.unpublishAll((err: Error | undefined) => { // Тепер тип err відомий
                     if (err) {
-                        // Не вважаємо це критичною помилкою, але логуємо
-                        console.warn("[UserDiscovery] Error during unpublishAll:", err);
-                        // Все одно продовжуємо до destroy
+                        // Тепер можна безпечно звертатись до err.message тощо
+                        console.warn("[UserDiscovery] Error during unpublishAll:", err.message);
                     } else {
                         console.log("[UserDiscovery] UnpublishAll completed.");
                     }
-                    resolve(); // Розрішуємо Promise незалежно від помилки unpublishAll
+                    resolve();
                 });
                 // Додамо таймаут про всяк випадок, якщо callback не викликається
                 setTimeout(() => {
@@ -212,11 +212,11 @@ export class UserDiscovery {
         try {
             this.browser = this.bonjour.find({ type: this.config.serviceType! });
 
-            this.browser.on('up', (service: RemoteService) => {
+            this.browser.on('up', (service: Service) => {
                 this._handleServiceUp(service);
             });
 
-            this.browser.on('down', (service: RemoteService) => {
+            this.browser.on('down', (service: Service) => {
                 this._handleServiceDown(service);
             });
 
@@ -237,7 +237,7 @@ export class UserDiscovery {
     }
 
     /** Обробляє подію знаходження нового сервісу ('up') */
-    private _handleServiceUp(service: RemoteService): void {
+    private _handleServiceUp(service: Service): void {
         const serviceKey = `${service.name}:${service.port}`;
         // console.log(`[UserDiscovery] Service UP detected: ${service.name} (${service.host}:${service.port}), Key: ${serviceKey}, OwnKey: ${this.ownServiceKey}`);
 
@@ -287,7 +287,7 @@ export class UserDiscovery {
     }
 
     /** Обробляє подію зникнення сервісу ('down') */
-    private _handleServiceDown(service: RemoteService): void {
+    private _handleServiceDown(service: Service): void {
         // console.log(`[UserDiscovery] Service DOWN detected: ${service.name}:${service.port}`);
 
         // 1. Ігноруємо себе (хоча 'down' для себе не мав би приходити)

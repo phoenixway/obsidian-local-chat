@@ -16,7 +16,7 @@ interface LocalChatPluginSettings {
 }
 
 // Інтерфейс для інформації про користувача (повертається UserDiscovery)
-interface UserInfo {
+export interface UserInfo {
 	nickname: string;
 	ip: string;
 	port: number;
@@ -24,7 +24,7 @@ interface UserInfo {
 }
 
 // Налаштування за замовчуванням
-const DEFAULT_SETTINGS: LocalChatPluginSettings = {
+export const DEFAULT_SETTINGS: LocalChatPluginSettings = {
 	userNickname: `ObsidianUser_${Math.random().toString(36).substring(2, 8)}`, // Генеруємо випадковий нік
 	listenPort: 61337, // Стандартний порт
 	saveHistory: true,
