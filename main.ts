@@ -64,11 +64,11 @@ export default class LocalChatPlugin extends Plugin {
 					const { WebSocketServer } = await import('ws');
 
 					// // Додаткова перевірка, чи отримали ми функцію-конструктор
-					// if (typeof WebSocketServer !== 'function') {
-					// 	// Якщо імпорт не вдався, логуємо структуру отриманого об'єкту для діагностики
-					// 	console.error("Failed to import WebSocketServer constructor correctly from 'ws' module. Imported object:", await import('ws'));
-					// 	throw new Error('WebSocketServer class could not be imported correctly.');
-					// }
+					if (typeof WebSocketServer !== 'function') {
+						// Якщо імпорт не вдався, логуємо структуру отриманого об'єкту для діагностики
+						console.error("Failed to import WebSocketServer constructor correctly from 'ws' module. Imported object:", await import('ws'));
+						throw new Error('WebSocketServer class could not be imported correctly.');
+					}
 					// // --- КІНЕЦЬ ЗМІНЕНОГО БЛОКУ ---
 
 					this.webSocketServerManager = new WebSocketServerManager(
