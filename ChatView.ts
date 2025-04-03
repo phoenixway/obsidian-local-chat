@@ -119,30 +119,36 @@ export class ChatView extends ItemView {
 
     // У файлі ChatView.ts всередині класу ChatView
 
-    addUserToList(userInfo: UserInfo): void { // Приймає { nickname: string }
+    // У файлі ChatView.ts всередині класу ChatView
+
+    addUserToList(userInfo: UserInfo): void { // Очікує { nickname: string }
+        // --- ДОДАНО/ПЕРЕВІРЕНО ПЕРЕВІРКУ (GUARD CLAUSE) ---
         if (!this.userListEl) {
-            console.error("addUserToList: userListEl is not defined!");
-            return; // Перевірка, чи існує контейнер списку
+            // Якщо елемент списку ще не створено (onOpen не завершився?) - виходимо
+            console.error("addUserToList Error: Attempted to add user before userListEl was ready.");
+            return;
         }
+        // --- КІНЕЦЬ ПЕРЕВІРКИ ---
 
+        // Перевіряємо, чи користувач вже є в списку
         if (this.knownUsers.has(userInfo.nickname)) {
-            // Користувач вже існує, просто оновлюємо статус елемента
             const existing = this.knownUsers.get(userInfo.nickname);
-            if (existing?.element) { // Перевіряємо, чи елемент існує
-                // --- ВИПРАВЛЕННЯ: Викликаємо методи окремо ---
-                existing.element.addClass('user-online');    // Спочатку додаємо клас
-                existing.element.removeClass('user-offline'); // Потім видаляємо інший клас
-                // --- КІНЕЦЬ ВИПРАВЛЕННЯ ---
+            if (existing?.element) {
+                // Просто оновлюємо класи, якщо користувач вже є
+                existing.element.addClass('user-online');
+                existing.element.removeClass('user-offline'); // Викликаємо окремо
             }
-            return; // Виходимо, бо користувач вже оброблений
+            return; // Виходимо, бо користувач вже існує
         }
 
-        // --- Логіка створення НОВОГО елемента користувача ---
+        // --- Створення НОВОГО елемента користувача ---
+        // Переконуємось, що використовується правильна назва: this.userListEl
         const userEl = this.userListEl.createDiv({
-            cls: "chat-user-list-item user-online", // Починаємо зі статусу онлайн
-            attr: { 'data-nickname': userInfo.nickname } // Додаємо data-атрибут
+            cls: "chat-user-list-item user-online",
+            attr: { 'data-nickname': userInfo.nickname }
         });
 
+        // Додаємо іконку та текст
         const iconEl = userEl.createSpan({ cls: 'user-icon' });
         setIcon(iconEl, 'user');
         userEl.createSpan({ cls: 'user-nickname', text: userInfo.nickname });
@@ -150,8 +156,11 @@ export class ChatView extends ItemView {
         // Зберігаємо інформацію в мапі
         this.knownUsers.set(userInfo.nickname, { nickname: userInfo.nickname, element: userEl });
 
-        // TODO: Додати обробник кліку на userEl для вибору отримувача?
+        // TODO: Додати обробник кліку для приватних повідомлень?
+        // userEl.addEventListener('click', () => { /* ... */ });
     }
+
+    // ... решта коду ChatView.ts ...
 
     // ... решта коду класу ChatView ...
 
