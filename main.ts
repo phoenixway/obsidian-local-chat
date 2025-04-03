@@ -52,32 +52,42 @@ export default class LocalChatPlugin extends Plugin {
 		const clientCallbacks: WebSocketClientCallbacks = this.createClientCallbacks();
 		const serverCallbacks: WebSocketServerCallbacks = this.createServerCallbacks();
 
-		// Initialize and start based on role
 		if (this.settings.role === 'server') {
 			if (Platform.isMobile) {
-				new Notice("Error: 'Server' role is not supported on mobile. Change in settings.", 10000);
+				new Notice("Error: 'Server' role is not supported on mobile. Please change in settings.", 10000);
 				console.error(`${pluginName} Cannot start in server mode on mobile.`);
 			} else {
 				console.log(`${pluginName} Initializing in SERVER mode on port ${this.settings.serverPort}...`);
 				try {
-					// Dynamic import of 'ws' for desktop-only server
-					const WSS = await import('ws');
-					const WebSocketServer = WSS.WebSocketServer; // Or WSS.default if needed
+					// --- ЗМІНЕНИЙ БЛОК ІМПОРТУ ТА ПЕРЕВІРКИ ---
+					// Використовуємо деструктуризацію для отримання іменованого експорту
+					const { WebSocketServer } = await import('ws');
 
+					// Додаткова перевірка, чи отримали ми функцію-конструктор
+					if (typeof WebSocketServer !== 'function') {
+						// Якщо імпорт не вдався, логуємо структуру отриманого об'єкту для діагностики
+						console.error("Failed to import WebSocketServer constructor correctly from 'ws' module. Imported object:", await import('ws'));
+						throw new Error('WebSocketServer class could not be imported correctly.');
+					}
+					// --- КІНЕЦЬ ЗМІНЕНОГО БЛОКУ ---
+
+					// Тепер передаємо перевірений конструктор WebSocketServer
 					this.webSocketServerManager = new WebSocketServerManager(
 						this.settings.serverPort,
-						this.settings.userNickname, // Pass own nickname
+						this.settings.userNickname,
 						serverCallbacks,
-						WebSocketServer
+						WebSocketServer // <-- Передаємо отриманий конструктор
 					);
-					await this.webSocketServerManager.start();
-					// Add self to user list immediately
-					this.handleUserFound({ nickname: this.settings.userNickname });
+
+					await this.webSocketServerManager.start(); // Помилка "is not a constructor" має зникнути
+
+					this.handleUserFound({ nickname: this.settings.userNickname }); // Додаємо себе до списку
 					new Notice(`${this.manifest.name}: Server started on port ${this.settings.serverPort}.`);
+
 				} catch (error: any) {
 					console.error(`${pluginName} CRITICAL ERROR starting WebSocket server:`, error);
 					new Notice(`[${this.manifest.name}] Failed to start server! Error: ${error.message}.`, 10000);
-					this.webSocketServerManager = null; // Ensure it's null on failure
+					this.webSocketServerManager = null; // Скидаємо стан при помилці
 				}
 			}
 		} else { // Role is 'client'
