@@ -23,7 +23,7 @@ import {
 
 } from './types';
 import { ChatSettingTab } from './SettingsTab'
-
+import { WebSocketServer } from 'ws';
 import * as fs from 'fs';
 import * as path from 'path';
 export default class LocalChatPlugin extends Plugin {
@@ -59,30 +59,28 @@ export default class LocalChatPlugin extends Plugin {
 			} else {
 				console.log(`${pluginName} Initializing in SERVER mode on port ${this.settings.serverPort}...`);
 				try {
-					// --- ЗМІНЕНИЙ БЛОК ІМПОРТУ ТА ПЕРЕВІРКИ ---
-					// Використовуємо деструктуризацію для отримання іменованого експорту
-					const { WebSocketServer } = await import('ws');
+					// // --- ЗМІНЕНИЙ БЛОК ІМПОРТУ ТА ПЕРЕВІРКИ ---
+					// // Використовуємо деструктуризацію для отримання іменованого експорту
+					// const { WebSocketServer } = await import('ws');
 
-					// Додаткова перевірка, чи отримали ми функцію-конструктор
-					if (typeof WebSocketServer !== 'function') {
-						// Якщо імпорт не вдався, логуємо структуру отриманого об'єкту для діагностики
-						console.error("Failed to import WebSocketServer constructor correctly from 'ws' module. Imported object:", await import('ws'));
-						throw new Error('WebSocketServer class could not be imported correctly.');
-					}
-					// --- КІНЕЦЬ ЗМІНЕНОГО БЛОКУ ---
+					// // Додаткова перевірка, чи отримали ми функцію-конструктор
+					// if (typeof WebSocketServer !== 'function') {
+					// 	// Якщо імпорт не вдався, логуємо структуру отриманого об'єкту для діагностики
+					// 	console.error("Failed to import WebSocketServer constructor correctly from 'ws' module. Imported object:", await import('ws'));
+					// 	throw new Error('WebSocketServer class could not be imported correctly.');
+					// }
+					// // --- КІНЕЦЬ ЗМІНЕНОГО БЛОКУ ---
 
-					// Тепер передаємо перевірений конструктор WebSocketServer
 					this.webSocketServerManager = new WebSocketServerManager(
 						this.settings.serverPort,
 						this.settings.userNickname,
 						serverCallbacks,
-						WebSocketServer // <-- Передаємо отриманий конструктор
+						WebSocketServer // Використовуємо імпортований конструктор
 					);
-
-					await this.webSocketServerManager.start(); // Помилка "is not a constructor" має зникнути
-
-					this.handleUserFound({ nickname: this.settings.userNickname }); // Додаємо себе до списку
+					await this.webSocketServerManager.start();
+					this.handleUserFound({ nickname: this.settings.userNickname });
 					new Notice(`${this.manifest.name}: Server started on port ${this.settings.serverPort}.`);
+
 
 				} catch (error: any) {
 					console.error(`${pluginName} CRITICAL ERROR starting WebSocket server:`, error);
