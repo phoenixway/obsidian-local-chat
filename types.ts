@@ -1,9 +1,6 @@
-// types.ts
+// types.ts (Чиста версія)
 
-/**
- * Represents basic information about a discovered user in the chat network.
- * In the WebSocket model, IP/Port are less relevant as communication goes via the server.
- */
+/** Information about a chat user */
 export interface UserInfo {
     nickname: string;
     // ip?: string; // Usually not needed by clients in WS model
@@ -11,81 +8,55 @@ export interface UserInfo {
     // id?: unknown; // A unique ID assigned by the server might be useful
 }
 
-export interface IdentifyMessage extends BaseMessage {
-    type: 'identify';
-    nickname: string; // Обов'язкова властивість для цього типу
-}
-
-/**
- * Defines the structure for the plugin's settings.
- */
+/** Plugin settings structure */
 export interface LocalChatPluginSettings {
-    /** The role this instance plays: client or server */
     role: 'client' | 'server';
-    /** WebSocket address for clients to connect to (e.g., "ws://192.168.1.5:61338") */
     serverAddress: string;
-    /** Port for the server instance to listen on */
     serverPort: number;
-    /** The nickname displayed to other users */
     userNickname: string;
-    /** Whether to persist chat history */
     saveHistory: boolean;
-    /** Download path relative to vault root (empty for default attachment folder) */
     downloadPath: string;
 }
 
-
-export const DEFAULT_SETTINGS: LocalChatPluginSettings = {
-    role: 'client',                     // За замовчуванням - клієнт
-    serverAddress: 'ws://127.0.0.1:61338', // Приклад адреси сервера
-    serverPort: 61338,                  // Новий порт за замовчуванням
-    userNickname: `ObsidianUser_${Math.random().toString(36).substring(2, 8)}`,
-    saveHistory: true,
-    downloadPath: '',
-}
-
-/**
- * Represents the state of a file offer initiated by the local user, waiting for acceptance/rejection.
- */
+/** State for a file offer initiated by the local user */
 export interface OutgoingFileOfferState {
     fileId: string;
-    /** Absolute path to the local file. NOTE: Getting this reliably in Obsidian/Electron needs care! */
-    filePath: string;
+    // filePath: string; // Path might be less relevant than the File object itself for WS
+    fileObject?: File; // Store the File object directly? Needs careful thought on memory/serialization
+    filePath?: string; // Or path to a temporary copy
     filename: string;
     size: number;
-    /** Target recipient nickname, or null for broadcast (if supported by server logic) */
-    recipientNickname: string | null;
+    recipientNickname: string | null; // null for broadcast
 }
 
-/**
- * Represents the state of a file offer received from another user, pending local acceptance/rejection.
- */
+/** State for a file offer received from another user */
 export interface IncomingFileOfferState {
     fileId: string;
     filename: string;
     size: number;
-    senderNickname: string;
-    /** Optional: Identifier of the sender (e.g., WebSocket client ID used by server) */
-    senderClientId?: unknown;
-    /** Optional: Original sender address (less useful in pure WS model) */
-    senderAddress?: string;
+    senderNickname: string; // Nickname of the user who sent the offer (Required)
+    senderClientId?: unknown;  // Store WebSocket client identifier (if server needs it)
+    senderAddress?: string; // Optional: Original sender address
 }
 
-/**
- * A generic structure for messages exchanged via WebSocket.
- * Specific message types will add their own properties.
- */
+/** Base interface for all WebSocket messages */
 export interface BaseMessage {
-    type: string; // e.g., 'text', 'fileOffer', 'fileAccept', 'fileDecline', 'userList', 'userJoin', 'userLeave', 'error'
+    type: string;
     timestamp: number;
-    senderNickname?: string; // Optional for server->client system messages
+    senderNickname?: string; // Optional for system messages like errors or user lists from server
 }
 
-// --- Example Specific Message Types (extending BaseMessage) ---
+// --- Specific Message Types ---
+
+export interface IdentifyMessage extends BaseMessage {
+    type: 'identify';
+    nickname: string;
+    // No senderNickname needed here, server identifies sender by connection
+}
 
 export interface TextMessage extends BaseMessage {
     type: 'text';
-    senderNickname: string; // Required for text
+    senderNickname: string; // Required
     content: string;
     recipient?: string | null; // Optional: For private messages routed by server
 }
@@ -96,55 +67,65 @@ export interface FileOfferMessage extends BaseMessage {
     fileId: string;
     filename: string;
     size: number;
-    recipient?: string | null; // Optional: For private offers routed by server
+    recipient?: string | null;
 }
 
 export interface FileAcceptMessage extends BaseMessage {
     type: 'fileAccept';
     senderNickname: string; // Who accepted
     fileId: string;
-    /** Nickname of the user who originally sent the offer */
-    originalSender: string;
+    originalSender: string; // Nickname of the user who originally sent the offer
 }
 
 export interface FileDeclineMessage extends BaseMessage {
     type: 'fileDecline';
     senderNickname: string; // Who declined
     fileId: string;
-    /** Nickname of the user who originally sent the offer */
     originalSender: string;
 }
 
 export interface UserListMessage extends BaseMessage {
     type: 'userList';
     users: UserInfo[]; // List of currently connected users
+    // No senderNickname needed, comes from server
 }
 
 export interface UserJoinMessage extends BaseMessage {
     type: 'userJoin';
     nickname: string; // Nickname of the user who joined
-    // server might add full UserInfo if needed
+    // No senderNickname needed, comes from server
 }
 
 export interface UserLeaveMessage extends BaseMessage {
     type: 'userLeave';
     nickname: string; // Nickname of the user who left
+    // No senderNickname needed, comes from server
 }
 
-// Union type for easier type checking in message handlers
+export interface ErrorMessage extends BaseMessage {
+    type: 'error';
+    message: string; // The error description
+    // No senderNickname needed, comes from server
+}
+
+// --- WebSocket Message Union Type ---
 export type WebSocketMessage =
-    | BaseMessage // Generic fallback? Unlikely needed if handlers check type string
+    | IdentifyMessage // Should come first? Order usually doesn't matter
     | TextMessage
     | FileOfferMessage
     | FileAcceptMessage
     | FileDeclineMessage
-    | IdentifyMessage // <-- Додано сюди
     | UserListMessage
     | UserJoinMessage
-    | UserLeaveMessage;
+    | UserLeaveMessage
+    | ErrorMessage;
+// DO NOT include BaseMessage here directly if all messages have a specific type
 
-
-// You can add other shared types/interfaces/enums here as your plugin evolves.
-// For example:
-// export type FileTransferStatus = 'pending' | 'accepted' | 'declined' | 'starting' | 'progressing' | 'completed' | 'error';
-// export interface ChatHistoryEntry { ... }
+export const DEFAULT_SETTINGS: LocalChatPluginSettings = {
+    role: 'client',                     // За замовчуванням - клієнт
+    serverAddress: 'ws://127.0.0.1:61338', // Приклад адреси сервера
+    serverPort: 61338,                  // Новий порт за замовчуванням
+    userNickname: `ObsidianUser_${Math.random().toString(36).substring(2, 8)}`,
+    saveHistory: true,
+    downloadPath: '',
+}

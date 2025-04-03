@@ -17,7 +17,7 @@ export class WebSocketClientManager {
     private callbacks: WebSocketClientCallbacks;
     private socket: WebSocket | null = null;
     private serverAddress: string | null = null;
-    private isConnected: boolean = false;
+    private _isConnected: boolean = false;
     private reconnectAttempts: number = 0;
     private maxReconnectAttempts: number = 5; // Max attempts before giving up
     private reconnectDelay: number = 5000; // Delay between attempts (ms)
@@ -27,7 +27,11 @@ export class WebSocketClientManager {
         this.callbacks = callbacks;
         // TODO: Validate callbacks
     }
-
+    public get isConnected(): boolean {
+        // Можна зробити перевірку надійнішою, враховуючи стан сокету
+        return this._isConnected && !!this.socket && this.socket.readyState === WebSocket.OPEN;
+    }
+    // --- КІНЕЦЬ ГЕТЕРА ---
     /** Ініціює підключення до сервера */
     public connect(address: string, nickname: string): void {
         if (this.socket && (this.socket.readyState === WebSocket.CONNECTING || this.socket.readyState === WebSocket.OPEN)) {
@@ -42,7 +46,7 @@ export class WebSocketClientManager {
 
         this.serverAddress = address;
         this.requestedNickname = nickname; // Store nickname for identification
-        this.isConnected = false;
+        this._isConnected = false;
         console.log(`[WSClient] Attempting to connect to ${this.serverAddress}...`);
 
         try {
@@ -70,7 +74,7 @@ export class WebSocketClientManager {
             this.socket.close(1000, "Client disconnecting normally"); // 1000 = Normal closure
         }
         this.socket = null;
-        this.isConnected = false;
+        this._isConnected = false;
         this.serverAddress = null;
         this.requestedNickname = null;
     }
@@ -79,7 +83,7 @@ export class WebSocketClientManager {
     public async sendMessage(payload: any): Promise<void> {
         // Wrap send in a Promise for potential future queueing/error handling
         return new Promise((resolve, reject) => {
-            if (!this.isConnected || !this.socket || this.socket.readyState !== WebSocket.OPEN) {
+            if (!this._isConnected || !this.socket || this.socket.readyState !== WebSocket.OPEN) {
                 console.warn("[WSClient] Cannot send message: Not connected.");
                 reject(new Error("WebSocket is not connected."));
                 return;
@@ -118,7 +122,7 @@ export class WebSocketClientManager {
     /** Обробник події відкриття з'єднання */
     private _handleOpen(event: Event): void {
         console.log(`[WSClient] Connection opened successfully to ${this.serverAddress}`);
-        this.isConnected = true;
+        this._isConnected = true;
         this.reconnectAttempts = 0; // Reset reconnect counter on successful connection
 
         // Send identification message immediately after opening
@@ -167,14 +171,14 @@ export class WebSocketClientManager {
     private _handleError(event: Event): void {
         console.error("[WSClient] WebSocket error:", event);
         // Note: The 'close' event will usually fire immediately after 'error'
-        this.isConnected = false; // Assume connection is lost on error
+        this._isConnected = false; // Assume connection is lost on error
         this.callbacks.onError(event);
     }
 
     /** Обробник події закриття з'єднання */
     private _handleClose(event: CloseEvent): void {
         console.warn(`[WSClient] WebSocket closed. Code: ${event.code}, Reason: '${event.reason}', Clean: ${event.wasClean}`);
-        this.isConnected = false;
+        this._isConnected = false;
         this.socket = null; // Clear the socket reference
         this.callbacks.onClose(event);
 
