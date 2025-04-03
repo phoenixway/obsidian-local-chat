@@ -180,34 +180,6 @@ export default class LocalChatPlugin extends Plugin {
 		*/
 
 
-		// --- Реєстрація View для Чату ---
-		this.registerView(
-			CHAT_VIEW_TYPE,
-			(leaf) => {
-				this.chatView = new ChatView(leaf, this); // Передаємо посилання на плагін у View
-				// TODO: Передати в ChatView посилання на networkManager/userDiscovery або функції для взаємодії
-				return this.chatView;
-			}
-		);
-
-		// --- Додавання Іконки на Бічну Панель ---
-		this.addRibbonIcon('message-circle', 'Відкрити Локальний Чат', (evt: MouseEvent) => {
-			this.activateView();
-		});
-
-		// --- Додавання Команди ---
-		this.addCommand({
-			id: 'open-local-chat-view',
-			name: 'Відкрити панель Локального Чату',
-			callback: () => {
-				this.activateView();
-			}
-		});
-
-		// --- Додавання Сторінки Налаштувань ---
-		this.addSettingTab(new ChatSettingTab(this.app, this));
-
-		console.log(`[${this.manifest.name}] Плагін завантажено.`);
 	}
 
 	async onunload() {
