@@ -23,7 +23,7 @@ import {
 
 } from './types';
 import { ChatSettingTab } from './SettingsTab'
-import { WebSocketServer } from 'ws';
+// import { WebSocketServer } from 'ws';
 import * as fs from 'fs';
 import * as path from 'path';
 export default class LocalChatPlugin extends Plugin {
@@ -71,14 +71,14 @@ export default class LocalChatPlugin extends Plugin {
 					// }
 					// // --- КІНЕЦЬ ЗМІНЕНОГО БЛОКУ ---
 
-					this.webSocketServerManager = new WebSocketServerManager(
-						this.settings.serverPort,
-						this.settings.userNickname,
-						serverCallbacks,
-						WebSocketServer // Використовуємо імпортований конструктор
-					);
-					await this.webSocketServerManager.start();
-					this.handleUserFound({ nickname: this.settings.userNickname });
+					// this.webSocketServerManager = new WebSocketServerManager(
+					// 	this.settings.serverPort,
+					// 	this.settings.userNickname,
+					// 	serverCallbacks,
+					// 	WebSocketServer // Використовуємо імпортований конструктор
+					// );
+					// await this.webSocketServerManager.start();
+					// this.handleUserFound({ nickname: this.settings.userNickname });
 					new Notice(`${this.manifest.name}: Server started on port ${this.settings.serverPort}.`);
 
 
