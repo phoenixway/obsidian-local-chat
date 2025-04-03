@@ -182,6 +182,7 @@ export class ChatView extends ItemView {
         }
 
         // Створюємо DOM елемент
+        if (!this.userListEl) return;
         const userEl = this.userListEl.createDiv({ cls: "chat-user-list-item user-online" });
         userEl.dataset.nickname = userInfo.nickname;
         const iconEl = userEl.createSpan({ cls: 'user-icon' });
