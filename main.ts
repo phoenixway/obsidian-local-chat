@@ -1,73 +1,152 @@
-import { App, Notice, Plugin, PluginSettingTab, Setting, WorkspaceLeaf } from 'obsidian';
-import { ChatView, CHAT_VIEW_TYPE } from './ChatView'; // Припускаємо, що ChatView в окремому файлі
-import { NetworkManager, NetworkManagerCallbacks } from './NetworkManager'; // Припускаємо, що мережева логіка тут
-import { UserDiscovery } from './UserDiscovery'; // Припускаємо, що логіка виявлення тут
-
+// main.ts
+import { App, Notice, Plugin, PluginSettingTab, Setting, WorkspaceLeaf, TFolder } from 'obsidian';
+import { ChatView, CHAT_VIEW_TYPE } from './ChatView';
+import { NetworkManager, NetworkManagerCallbacks } from './NetworkManager';
+import { UserDiscovery, UserDiscoveryCallbacks, UserDiscoveryConfig } from './UserDiscovery'; // Assuming UserDiscovery exports these
 import * as fs from 'fs';
 import * as path from 'path';
 
-// Інтерфейс для налаштувань плагіну
-interface LocalChatPluginSettings {
-	userNickname: string;
-	listenPort: number;
-	saveHistory: boolean;
-	downloadPath: string;
-	// Додайте інші налаштування за потреби
-}
+// --- Interfaces & Types ---
 
-// Інтерфейс для інформації про користувача (повертається UserDiscovery)
+// Export UserInfo so UserDiscovery.ts can import it from here
 export interface UserInfo {
 	nickname: string;
 	ip: string;
 	port: number;
-	// Можна додати інші поля, якщо UserDiscovery їх надає (наприклад, статус, id)
 }
 
-// Налаштування за замовчуванням
+// Define settings interface
+interface LocalChatPluginSettings {
+	userNickname: string;
+	listenPort: number;
+	saveHistory: boolean;
+	downloadPath: string; // Path relative to vault root, or empty for default attachment folder
+}
+
+// --- Constants ---
+
 export const DEFAULT_SETTINGS: LocalChatPluginSettings = {
-	userNickname: `ObsidianUser_${Math.random().toString(36).substring(2, 8)}`, // Генеруємо випадковий нік
-	listenPort: 61337, // Стандартний порт
+	userNickname: `ObsidianUser_${Math.random().toString(36).substring(2, 8)}`,
+	listenPort: 61337,
 	saveHistory: true,
 	downloadPath: '',
 }
 
+// --- Main Plugin Class ---
+
 export default class LocalChatPlugin extends Plugin {
 	settings: LocalChatPluginSettings;
-	chatView: ChatView | null = null; // Зберігаємо посилання на екземпляр View
+	chatView: ChatView | null = null;
 	networkManager: NetworkManager | null = null;
-	userDiscovery: UserDiscovery;
-	private outgoingFileOffers: Map<string, {
-		fileId: string;
-		filePath: string; // Абсолютний шлях до файлу на диску відправника
-		filename: string;
-		size: number; // <-- ДОДАНО ЦЕ ПОЛЕ
-		recipientNickname: string | null; // null для broadcast або якщо ще не визначено
-	}> = new Map();
+	userDiscovery: UserDiscovery | null = null; // Initialize as null
 
-	private incomingFileOffers: Map<string, {
-		fileId: string;
-		filename: string;
-		size: number;
-		senderNickname: string; // Зберігаємо нік відправника
-		senderAddress: string; // Зберігаємо ip:port відправника
-	}> = new Map();
+	// File transfer state
+	private outgoingFileOffers: Map<string, { fileId: string; filePath: string; filename: string; size: number; recipientNickname: string | null; }> = new Map();
+	private incomingFileOffers: Map<string, { fileId: string; filename: string; size: number; senderNickname: string; senderAddress: string; }> = new Map();
+
+	// --- Plugin Lifecycle ---
 
 	async onload() {
-		console.log(`[${this.manifest.name}] Завантаження плагіну...`);
+		const pluginName = `[${this.manifest.name}]`;
+		console.log(`${pluginName} Loading plugin...`);
 
-		// --- Завантаження Налаштувань ---
 		await this.loadSettings();
+		console.log(`${pluginName} Settings loaded. Nickname: ${this.settings.userNickname}, Port: ${this.settings.listenPort}`);
 
-		// --- Ініціалізація Основних Компонентів (Мережа, Виявлення) ---
-		// Важливо: Це місце, де ви створите та налаштуєте ваші мережеві модулі
-		console.log(`[${this.manifest.name}] Використовується псевдонім: ${this.settings.userNickname}`);
-		console.log(`[${this.manifest.name}] Очікуваний порт: ${this.settings.listenPort}`);
+		// Define callbacks
+		const networkCallbacks: NetworkManagerCallbacks = this.createNetworkCallbacks();
+		const discoveryCallbacks: UserDiscoveryCallbacks = this.createUserDiscoveryCallbacks();
 
-		// Приклад ініціалізації (потрібно створити ці класи/модулі):
+		// Initialize Network components
+		this.networkManager = new NetworkManager(this.settings.listenPort, networkCallbacks);
+		this.userDiscovery = new UserDiscovery({
+			nickname: this.settings.userNickname,
+			port: this.settings.listenPort
+		}, discoveryCallbacks);
 
-		// 2. Визначаємо об'єкт з callback-функціями для NetworkManager
-		// Важливо використовувати .bind(this), щоб зберегти контекст 'this' всередині обробників
-		const networkCallbacks: NetworkManagerCallbacks = {
+		// Start network services sequentially
+		try {
+			await this.networkManager.startServer();
+			console.log(`${pluginName} TCP server started on port ${this.settings.listenPort}.`);
+
+			await this.userDiscovery.start();
+			console.log(`${pluginName} User discovery started.`);
+
+			new Notice(`${this.manifest.name}: Chat service active.`);
+
+		} catch (error: any) {
+			console.error(`${pluginName} CRITICAL ERROR starting network services:`, error);
+			new Notice(`[${this.manifest.name}] Failed to start chat services! Error: ${error.message}. Chat will be unavailable.`);
+			await this.cleanupNetworkServices(); // Attempt cleanup
+			return; // Prevent further loading
+		}
+
+		// Register Obsidian UI components
+		this.registerView(
+			CHAT_VIEW_TYPE,
+			(leaf) => {
+				this.chatView = new ChatView(leaf, this);
+				this.populateInitialChatViewState(); // Populate users/history on view open
+				return this.chatView;
+			}
+		);
+
+		this.addRibbonIcon('message-circle', 'Open Local Chat', () => this.activateView());
+		this.addCommand({
+			id: 'open-local-chat-view',
+			name: 'Open Local Chat panel',
+			callback: () => this.activateView(),
+		});
+		this.addSettingTab(new ChatSettingTab(this.app, this));
+
+		console.log(`${pluginName} Plugin loaded successfully.`);
+	}
+
+	async onunload() {
+		console.log(`[${this.manifest.name}] Unloading plugin...`);
+		await this.cleanupNetworkServices();
+
+		// Clean up UI and plugin state
+		this.app.workspace.detachLeavesOfType(CHAT_VIEW_TYPE);
+		this.chatView = null;
+		this.outgoingFileOffers.clear();
+		this.incomingFileOffers.clear();
+
+		console.log(`[${this.manifest.name}] Plugin unloaded.`);
+	}
+
+	/** Populates the chat view with current users and potentially history */
+	private populateInitialChatViewState(): void {
+		if (!this.chatView) return;
+		// Add currently known users to the list
+		this.userDiscovery?.getAllUsers().forEach(user => this.chatView?.addUserToList(user));
+		// TODO: Load and display chat history from storage
+		console.log(`[${this.manifest.name}] Populated initial chat view state.`);
+	}
+
+	// --- Network Service Cleanup ---
+	private async cleanupNetworkServices(): Promise<void> {
+		if (this.userDiscovery) {
+			try {
+				await this.userDiscovery.stop();
+				console.log(`[${this.manifest.name}] User discovery stopped.`);
+			} catch (err) { console.error(`[${this.manifest.name}] Error stopping UserDiscovery:`, err); }
+			this.userDiscovery = null;
+		}
+		if (this.networkManager) {
+			try {
+				await this.networkManager.stopServer();
+				console.log(`[${this.manifest.name}] TCP server stopped.`);
+			} catch (err) { console.error(`[${this.manifest.name}] Error stopping NetworkManager:`, err); }
+			this.networkManager = null;
+		}
+	}
+
+	// --- Callback Creation ---
+
+	private createNetworkCallbacks(): NetworkManagerCallbacks {
+		// Return the object with bound methods
+		return {
 			onMessageReceived: this.handleIncomingMessage.bind(this),
 			onFileOfferReceived: this.handleIncomingFileOffer.bind(this),
 			onFileAcceptReceived: this.handleFileAcceptReceived.bind(this),
@@ -76,960 +155,465 @@ export default class LocalChatPlugin extends Plugin {
 			onFileTransferProgress: this.handleFileTransferProgress.bind(this),
 			onFileTransferComplete: this.handleFileTransferComplete.bind(this),
 			onFileTransferError: this.handleFileTransferError.bind(this),
-			onClientConnected: (clientInfo) => {
-				console.log(`[${this.manifest.name}] Клієнт підключився: ${clientInfo.ip}:${clientInfo.port}`);
-				// TODO: Можливо оновити статус користувача в UI, якщо відстежуємо з'єднання
-			},
-			onClientDisconnected: (clientInfo) => {
-				console.log(`[${this.manifest.name}] Клієнт відключився: ${clientInfo.ip}:${clientInfo.port}`);
-				// TODO: Можливо оновити статус користувача в UI
-			},
-			onNetworkError: (context: string, error: Error) => {
-				// Уникаємо надто нав'язливих повідомлень про типові помилки з'єднання
-				if (error.message.includes('ECONNREFUSED') || error.message.includes('ETIMEDOUT')) {
-					console.warn(`[${this.manifest.name}] Мережева помилка (${context}): ${error.message}`);
-				} else {
-					console.error(`[${this.manifest.name}] Серйозна мережева помилка (${context}):`, error);
-					new Notice(`Помилка мережі (${context}): ${error.message}`);
-				}
+			onClientConnected: (clientInfo) => console.log(`[${this.manifest.name}] Client connected: ${clientInfo.ip}:${clientInfo.port}`),
+			onClientDisconnected: (clientInfo) => console.log(`[${this.manifest.name}] Client disconnected: ${clientInfo.ip}:${clientInfo.port}`),
+			onNetworkError: (context, error) => {
+				const isCommonError = ['ECONNREFUSED', 'ETIMEDOUT', 'EHOSTUNREACH'].some(code => error.message.includes(code));
+				if (isCommonError) console.warn(`[${this.manifest.name}] Network Error (${context}): ${error.message}`);
+				else { console.error(`[${this.manifest.name}] Serious Network Error (${context}):`, error); new Notice(`Network Error (${context}): ${error.message}`); }
 			},
 		};
+	}
 
-		// 3. Створюємо екземпляр NetworkManager
-		this.networkManager = new NetworkManager(this.settings.listenPort, networkCallbacks);
-
-		// 4. Запускаємо сервер NetworkManager (а потім UserDiscovery)
-		try {
-			await this.networkManager.startServer();
-			console.log(`[${this.manifest.name}] TCP сервер успішно запущено на порті ${this.settings.listenPort}.`);
-
-			// --- Тут ініціалізуємо та запускаємо UserDiscovery ---
-			/*
-			const discoveryCallbacks = {
-				onUserFound: this.handleUserFound.bind(this),
-				onUserLeft: this.handleUserLeft.bind(this),
-			};
-			this.userDiscovery = new UserDiscovery({
-					nickname: this.settings.userNickname,
-					port: this.settings.listenPort
-				}, discoveryCallbacks);
-
-			await this.userDiscovery.start();
-			console.log(`[${this.manifest.name}] Виявлення користувачів запущено.`);
-			*/
-			// ----------------------------------------------------
-
-			new Notice(`[${this.manifest.name}] Чат активний.`);
-
-		} catch (error: any) {
-			console.error(`[${this.manifest.name}] КРИТИЧНА ПОМИЛКА запуску мережевих сервісів:`, error);
-			new Notice(`[${this.manifest.name}] Не вдалося запустити сервіси чату! Помилка: ${error.message}. Функціонал недоступний.`);
-			// Важливо зупинити те, що могло запуститись, і скинути стан
-			if (this.networkManager) {
-				await this.networkManager.stopServer();
-				this.networkManager = null;
-			}
-			/* if (this.userDiscovery) {
-				await this.userDiscovery.stop();
-				this.userDiscovery = null;
-			} */
-			return; // Зупиняємо подальше завантаження плагіну
-		}
-
-		// 5. Реєструємо решту компонентів Obsidian (View, команди, налаштування)
-		this.registerView(
-			CHAT_VIEW_TYPE,
-			(leaf) => {
-				this.chatView = new ChatView(leaf, this);
-				// Одразу передаємо поточний список користувачів у View, якщо він є
-				// this.userDiscovery?.getAllUsers().forEach(user => this.chatView?.addUserToList(user));
-				// TODO: Передати історію
-				return this.chatView;
-			}
-		);
-
-		this.addRibbonIcon('message-circle', 'Відкрити Локальний Чат', (evt: MouseEvent) => {
-			this.activateView();
-		});
-
-		this.addCommand({
-			id: 'open-local-chat-view',
-			name: 'Відкрити панель Локального Чату',
-			callback: () => { this.activateView(); }
-		});
-
-		this.addSettingTab(new ChatSettingTab(this.app, this));
-
-		console.log(`[${this.manifest.name}] Плагін успішно завантажено та готовий до роботи.`);
-
-		/*this.userDiscovery = new UserDiscovery({
-			nickname: this.settings.userNickname,
-			port: this.settings.listenPort,
+	private createUserDiscoveryCallbacks(): UserDiscoveryCallbacks {
+		// Return the object with bound methods
+		return {
 			onUserFound: this.handleUserFound.bind(this),
 			onUserLeft: this.handleUserLeft.bind(this),
-		});
-
-		try {
-			await this.networkManager.startServer(); // Запускаємо TCP сервер
-			await this.userDiscovery.start();      // Запускаємо mDNS виявлення/рекламу
-			new Notice(`[${this.manifest.name}] Сервер та виявлення запущені.`);
-		} catch (error) {
-			console.error(`[${this.manifest.name}] Помилка запуску мережевих сервісів:`, error);
-			new Notice(`[${this.manifest.name}] Помилка запуску мережевих сервісів! Див. консоль.`);
-		}
-		*/
-
-
+			onDiscoveryError: (context, error) => {
+				console.error(`[${this.manifest.name}] Discovery Error (${context}):`, error);
+				new Notice(`Discovery Error: ${error.message}`);
+			}
+		};
 	}
 
-	async onunload() {
-		console.log(`[${this.manifest.name}] Вивантаження плагіну...`);
-
-		// Зупиняємо мережеві компоненти (спочатку виявлення, потім сервер)
-		/* if (this.userDiscovery) {
-			try {
-				await this.userDiscovery.stop();
-				console.log(`[${this.manifest.name}] Виявлення користувачів зупинено.`);
-			} catch(err) { console.error(`[${this.manifest.name}] Помилка зупинки UserDiscovery:`, err); }
-			this.userDiscovery = null;
-		} */
-		if (this.networkManager) {
-			try {
-				await this.networkManager.stopServer();
-				console.log(`[${this.manifest.name}] TCP сервер зупинено.`);
-			} catch (err) { console.error(`[${this.manifest.name}] Помилка зупинки NetworkManager:`, err); }
-			this.networkManager = null;
-		}
-
-		this.app.workspace.detachLeavesOfType(CHAT_VIEW_TYPE);
-		this.chatView = null; // Очищаємо посилання
-		this.outgoingFileOffers.clear();
-		this.incomingFileOffers.clear();
-
-		console.log(`[${this.manifest.name}] Плагін вивантажено.`);
-	}
-
-	// --- Методи-обробники для NetworkManager Callbacks ---
-	// (Додайте сюди реалізацію ВСІХ функцій, визначених у NetworkManagerCallbacks)
+	// --- Network & Discovery Callback Handlers ---
 
 	private handleIncomingMessage(sender: { ip: string, port: number }, message: any): void {
-		console.log(`[${this.manifest.name}] Отримано message від ${sender.ip}:${sender.port}`, message);
-		// Знаходимо нік відправника (якщо UserDiscovery працює)
-		// const senderNickname = this.userDiscovery?.findUserByAddress(sender.ip, sender.port)?.nickname || `${sender.ip}:${sender.port}`;
-		const senderNickname = message.senderNickname || `${sender.ip}:${sender.port}`; // Беремо з повідомлення або fallback
+		const senderInfo = this.userDiscovery?.getAllUsers().find(u => u.ip === sender.ip && u.port === sender.port);
+		const senderNickname = senderInfo?.nickname || message.senderNickname || `${sender.ip}:${sender.port}`;
 
 		if (message.type === 'text' && message.content) {
+			console.log(`[${this.manifest.name}] Received text from ${senderNickname}`);
 			this.chatView?.displayMessage(senderNickname, message.content, message.timestamp || Date.now(), false);
-
-			// TODO: Збереження в історію
-			// if (this.settings.saveHistory) { ... }
-
-			// Показуємо сповіщення, якщо чат не активний
-			if (!this.isChatViewActive()) {
-				new Notice(`${senderNickname}: ${message.content.substring(0, 50)}${message.content.length > 50 ? '...' : ''}`);
-			}
+			// TODO: Save message to history
+			if (!this.isChatViewActive()) new Notice(`${senderNickname}: ${message.content.substring(0, 50)}...`);
 		} else {
-			console.warn(`[${this.manifest.name}] Отримано невідомий тип повідомлення або не 'text':`, message);
+			console.warn(`[${this.manifest.name}] Received unknown message type:`, message);
 		}
 	}
 
 	private handleIncomingFileOffer(sender: { ip: string, port: number }, fileInfo: { fileId: string, filename: string, size: number }): void {
-		console.log(`[${this.manifest.name}] Отримано fileOffer від ${sender.ip}:${sender.port}`, fileInfo);
-		// const senderNickname = this.userDiscovery?.findUserByAddress(sender.ip, sender.port)?.nickname || `${sender.ip}:${sender.port}`;
-		const senderNickname = "UnknownSender"; // Потрібно знайти спосіб отримати нік з UserDiscovery або додати в payload
+		const senderInfo = this.userDiscovery?.getAllUsers().find(u => u.ip === sender.ip && u.port === sender.port);
+		const senderNickname = senderInfo?.nickname || "Unknown Sender"; // Use found nickname or fallback
+		const senderAddress = `${sender.ip}:${sender.port}`;
 
-		// Зберігаємо інформацію про пропозицію локально
-		this.incomingFileOffers.set(fileInfo.fileId, {
-			...fileInfo,
-			senderNickname: senderNickname, // TODO: Get real nickname
-			senderAddress: `${sender.ip}:${sender.port}`
-		});
-
-		// Показуємо пропозицію в UI
-		this.chatView?.displayFileOffer(senderNickname, fileInfo); // TODO: Pass real nickname
-
-		// Показуємо сповіщення, якщо чат не активний
-		if (!this.isChatViewActive()) {
-			new Notice(`Пропозиція файлу '${fileInfo.filename}' від ${senderNickname}`);
-		}
+		console.log(`[${this.manifest.name}] Received file offer '${fileInfo.filename}' from ${senderNickname} (${senderAddress}) (ID: ${fileInfo.fileId})`);
+		this.incomingFileOffers.set(fileInfo.fileId, { ...fileInfo, senderNickname, senderAddress });
+		this.chatView?.displayFileOffer(senderNickname, fileInfo);
+		if (!this.isChatViewActive()) new Notice(`File offer '${fileInfo.filename}' from ${senderNickname}`);
 	}
 
 	private handleFileAcceptReceived(sender: { ip: string, port: number }, fileId: string): void {
-		console.log(`[${this.manifest.name}] Отримано fileAccept для ${fileId} від ${sender.ip}:${sender.port}`);
+		console.log(`[${this.manifest.name}] Received fileAccept for ${fileId} from ${sender.ip}:${sender.port}`);
 		const offer = this.outgoingFileOffers.get(fileId);
 
-		if (offer && this.networkManager) {
-			console.log(`[${this.manifest.name}] Починаємо надсилання файлу ${offer.filename} (${offer.filePath})`);
-			this.networkManager.startFileTransfer(sender.ip, sender.port, fileId, offer.filePath)
-				.then(() => {
-					console.log(`[${this.manifest.name}] StartFileTransfer для ${fileId} ініційовано.`);
-					// Оновлюємо UI через updateFileProgress
-					this.chatView?.updateFileProgress?.(fileId, 'upload', 0, offer.size, 'starting'); // Статус початку
-				})
-				.catch(err => {
-					console.error(`[${this.manifest.name}] Помилка ініціалізації startFileTransfer для ${fileId}:`, err);
-					new Notice(`Не вдалося почати передачу файлу ${offer.filename}.`);
-					this.outgoingFileOffers.delete(fileId); // Очищаємо стан
-					// Оновлюємо UI через updateFileProgress
-					this.chatView?.updateFileProgress?.(fileId, 'upload', 0, offer.size, 'error'); // Статус помилки
-				});
-		} else {
-			console.error(`[${this.manifest.name}] Отримано fileAccept для невідомого або неактивного fileId: ${fileId}`);
-		}
+		if (!offer) { console.error(`[${this.manifest.name}] Unknown outgoing offer ID for fileAccept: ${fileId}`); return; }
+		if (!this.networkManager) { console.error(`[${this.manifest.name}] NM inactive, cannot start transfer ${fileId}`); return; }
+
+		console.log(`[${this.manifest.name}] Starting upload for ${offer.filename}`);
+		this.networkManager.startFileTransfer(sender.ip, sender.port, fileId, offer.filePath)
+			.then(() => console.log(`[${this.manifest.name}] Upload initiated for ${fileId}.`))
+			.catch(err => {
+				console.error(`[${this.manifest.name}] Failed initiate startFileTransfer ${fileId}:`, err);
+				new Notice(`Failed to start sending ${offer.filename}.`);
+				this.outgoingFileOffers.delete(fileId);
+				this.chatView?.updateFileProgress?.(fileId, 'upload', 0, offer.size, 'error');
+			});
 	}
+
 	private handleFileDeclineReceived(sender: { ip: string, port: number }, fileId: string): void {
-		console.log(`[${this.manifest.name}] Отримано fileDecline для ${fileId} від ${sender.ip}:${sender.port}`);
+		console.log(`[${this.manifest.name}] Received fileDecline for ${fileId} from ${sender.ip}:${sender.port}`);
 		const offer = this.outgoingFileOffers.get(fileId);
 		if (offer) {
-			new Notice(`Користувач відхилив передачу файлу: ${offer.filename}`);
+			new Notice(`User declined file: ${offer.filename}`);
 			this.outgoingFileOffers.delete(fileId);
-			// Оновлюємо UI через updateFileProgress
-			this.chatView?.updateFileProgress?.(fileId, 'upload', 0, offer.size || 0, 'declined'); // Статус відхилено
+			this.chatView?.updateFileProgress?.(fileId, 'upload', 0, offer.size || 0, 'declined');
 		} else {
-			console.warn(`[${this.manifest.name}] Отримано fileDecline для невідомого fileId: ${fileId}`);
+			console.warn(`[${this.manifest.name}] Received fileDecline for unknown outgoing offer ID: ${fileId}`);
 		}
 	}
 
 	private handleFileTransferStart(fileId: string, direction: 'upload' | 'download', totalSize: number): void {
-		console.log(`[${this.manifest.name}] Початок передачі файлу ${fileId} (${direction}), розмір: ${totalSize}`);
-		// TODO: Оновити UI, показати початок прогресу
+		console.log(`[${this.manifest.name}] Transfer started: ${fileId} (${direction}), Size: ${totalSize}`);
 		this.chatView?.updateFileProgress?.(fileId, direction, 0, totalSize, 'starting');
 	}
 
 	private handleFileTransferProgress(fileId: string, direction: 'upload' | 'download', transferredBytes: number, totalSize: number): void {
-		// Оновлюємо прогрес не надто часто, щоб не навантажувати UI
-		// Можна додати логіку тротлінгу тут, якщо потрібно
-		console.log(`[${this.manifest.name}] Прогрес ${fileId} (${direction}): ${transferredBytes}/${totalSize}`);
-		// TODO: Оновити UI, показати прогрес
 		this.chatView?.updateFileProgress?.(fileId, direction, transferredBytes, totalSize, 'progressing');
 	}
 
 	private handleFileTransferComplete(fileId: string, direction: 'upload' | 'download', filePath: string | null): void {
-		if (direction === 'download' && filePath) {
-			const offer = this.incomingFileOffers.get(fileId);
-			const filename = offer?.filename || path.basename(filePath);
-			console.log(`[${this.manifest.name}] Файл ${fileId} (${filename}) успішно отримано: ${filePath}`);
-			new Notice(`Файл '${filename}' завантажено.`);
-			this.incomingFileOffers.delete(fileId); // Очищаємо стан
-			// TODO: Оновити UI, показати завершення
-			this.chatView?.updateFileProgress?.(fileId, direction, offer?.size || 0, offer?.size || 0, 'completed');
-		} else if (direction === 'upload') {
-			const offer = this.outgoingFileOffers.get(fileId);
-			const filename = offer?.filename || 'файл';
-			console.log(`[${this.manifest.name}] Файл ${fileId} (${filename}) успішно надіслано.`);
-			new Notice(`Файл '${filename}' надіслано.`);
-			this.outgoingFileOffers.delete(fileId); // Очищаємо стан
-			// TODO: Оновити UI, показати завершення
-			this.chatView?.updateFileProgress?.(fileId, direction, offer?.size || 0, offer?.size || 0, 'completed'); // Потрібно знати розмір файлу
-		}
+		const offer = direction === 'download' ? this.incomingFileOffers.get(fileId) : this.outgoingFileOffers.get(fileId);
+		const filename = offer?.filename || (filePath ? path.basename(filePath) : 'file');
+		const offerSize = offer?.size || 0;
+
+		const message = direction === 'download' ? `File '${filename}' received.` : `File '${filename}' sent.`;
+		console.log(`[${this.manifest.name}] ${message} (ID: ${fileId})`);
+		new Notice(message, 4000); // Show notice for 4 seconds
+
+		if (direction === 'download') this.incomingFileOffers.delete(fileId);
+		if (direction === 'upload') this.outgoingFileOffers.delete(fileId);
+		this.chatView?.updateFileProgress?.(fileId, direction, offerSize, offerSize, 'completed');
 	}
 
 	private handleFileTransferError(fileId: string, direction: 'upload' | 'download', error: Error): void {
-		console.error(`[${this.manifest.name}] Помилка передачі файлу ${fileId} (${direction}):`, error);
-		const filename = (direction === 'upload' ? this.outgoingFileOffers.get(fileId)?.filename : this.incomingFileOffers.get(fileId)?.filename) || 'файл';
-		new Notice(`Помилка передачі файлу '${filename}': ${error.message}`);
+		console.error(`[${this.manifest.name}] File transfer error: ${fileId} (${direction})`, error);
+		const offer = (direction === 'upload') ? this.outgoingFileOffers.get(fileId) : this.incomingFileOffers.get(fileId);
+		const filename = offer?.filename || 'file';
+		new Notice(`Error transferring file '${filename}': ${error.message}`, 5000); // Show error longer
 
-		// Очищаємо стан
 		if (direction === 'upload') this.outgoingFileOffers.delete(fileId);
 		if (direction === 'download') this.incomingFileOffers.delete(fileId);
-
-		// TODO: Оновити UI, показати помилку
 		this.chatView?.updateFileProgress?.(fileId, direction, 0, 0, 'error');
 	}
 
-
-	// --- Допоміжні методи ---
-
-	/** Перевіряє, чи відкрита та активна панель чату */
-	private isChatViewActive(): boolean {
-		const chatLeaves = this.app.workspace.getLeavesOfType(CHAT_VIEW_TYPE);
-		if (chatLeaves.length === 0) return false;
-		// Перевіряємо, чи активна хоча б одна з панелей чату
-		return chatLeaves.some(leaf => this.app.workspace.activeLeaf === leaf);
+	private handleUserFound(userInfo: UserInfo): void {
+		console.log(`[${this.manifest.name}] User Found: ${userInfo.nickname} (${userInfo.ip}:${userInfo.port})`);
+		this.chatView?.addUserToList(userInfo);
+		// TODO: Request history from new user or send welcome?
 	}
 
-	/** Визначає шлях для збереження файлу */
-	private async determineSavePath(filename: string): Promise<string> {
-		let downloadDir = this.settings.downloadPath;
+	private handleUserLeft(userInfo: { nickname: string }): void {
+		console.log(`[${this.manifest.name}] User Left: ${userInfo.nickname}`);
+		this.chatView?.removeUserFromList(userInfo.nickname);
+	}
 
-		// Якщо шлях не вказано, використовуємо папку вкладень сховища
-		if (!downloadDir) {
-			// const attachmentPath = this.app.vault.getConfig('attachmentFolderPath'); // '/_attachments'
-			const attachmentPath = (this.app.vault as any).getConfig('attachmentFolderPath');
+	// --- Public Methods (API for ChatView) ---
 
+	/** Sends a text message */
+	async sendMessage(recipientNickname: string | null, message: string): Promise<void> {
+		const senderNickname = this.settings.userNickname;
+		const timestamp = Date.now();
+		if (!message?.trim()) return;
+		const trimmedMessage = message.trim();
 
-			if (attachmentPath && typeof attachmentPath === 'string') {
-				if (attachmentPath.startsWith('/')) {
-					downloadDir = attachmentPath.substring(1);
+		// Display & Save locally first
+		this.chatView?.displayMessage(senderNickname, trimmedMessage, timestamp, true);
+		// TODO: Save to history -> { ..., status: 'sending' }
 
-				}
-				else {
-					downloadDir = attachmentPath;
-				}
-				// Переконуємось, що базова папка існує (Obsidian зазвичай це робить сам для вкладень)
-				try {
-					const abstractBase = this.app.vault.getAbstractFileByPath(downloadDir);
-					if (!abstractBase) {
-						await this.app.vault.createFolder(downloadDir);
-					}
-				} catch (err) {
-					console.error(`Не вдалося створити/перевірити папку вкладень ${downloadDir}, використовуємо корінь сховища`, err);
-					downloadDir = ''; // Корінь сховища як fallback
-				}
-			} else {
-				console.warn("Не вдалося отримати attachmentFolderPath або це не рядок, використовуємо корінь сховища.");
-				downloadDir = ''; // Корінь сховища як fallback
-			}
-		}
+		// Check prerequisites
+		if (!this.networkManager) { new Notice("Network Error: Service not active."); /* TODO: update history status */ return; }
+		if (recipientNickname !== null && !this.userDiscovery) { new Notice("Discovery Error: Cannot send private message."); /* TODO: update history status */ return; }
 
-		// Потрібен абсолютний шлях для fs.createWriteStream
-		const vaultBasePath = (this.app.vault.adapter as any).getBasePath(); // Недокументований API, може змінитись!
-		const absoluteDir = path.join(vaultBasePath, downloadDir);
+		const nm = this.networkManager;
+		const ud = this.userDiscovery;
+		const payload = { type: 'text', senderNickname, content: trimmedMessage, timestamp };
+		let noticeMessage: string | null = null;
+		let failedSends = 0;
 
-		// Перевірка та створення директорії (про всяк випадок)
 		try {
-			if (!fs.existsSync(absoluteDir)) {
-				await fs.promises.mkdir(absoluteDir, { recursive: true });
+			if (recipientNickname === null) { // Broadcast
+				const recipients = ud ? ud.getAllUsers().filter((user) => user.nickname !== senderNickname) : [];
+				if (recipients.length === 0) { console.log(`[${this.manifest.name}] No users for broadcast.`); return; }
+
+				const results = await Promise.allSettled(
+					recipients.map((user) => nm.sendData(user.ip, user.port, payload).catch(err => Promise.reject({ nickname: user.nickname, error: err })))
+				);
+				failedSends = results.filter(r => r.status === 'rejected').length;
+				if (failedSends > 0) {
+					console.warn(`[${this.manifest.name}] Failed broadcast to ${failedSends} user(s).`);
+					noticeMessage = `Message sent, but failed for ${failedSends} user(s).`;
+				} else console.log(`[${this.manifest.name}] Broadcast message initiated for ${recipients.length} users.`);
+				// TODO: Update history status (sent/delivered/failed per user?)
+
+			} else { // Private
+				const recipientInfo = ud ? ud.getUserInfo(recipientNickname) : null;
+				if (!recipientInfo) throw new Error(`User ${recipientNickname} not found.`);
+				await nm.sendData(recipientInfo.ip, recipientInfo.port, payload);
+				console.log(`[${this.manifest.name}] Private message sent to ${recipientNickname}.`);
+				// TODO: Update history status (sent/delivered)
 			}
-		} catch (err) {
-			console.error(`Не вдалося створити директорію ${absoluteDir}, використовуємо корінь сховища`, err);
-			// Якщо не вдалося створити вказану/папку вкладень, зберігаємо в корінь сховища
-			return path.join(vaultBasePath, this.sanitizeFilename(filename));
+		} catch (error: any) {
+			console.error(`[${this.manifest.name}] Error sending message:`, error);
+			noticeMessage = `Error sending message: ${error.message}`;
+			// TODO: Update history status (failed)
 		}
-
-
-		// Обробка конфліктів імен: додаємо (1), (2) тощо.
-		let savePath = path.join(absoluteDir, this.sanitizeFilename(filename));
-		let counter = 1;
-		while (fs.existsSync(savePath)) {
-			const extension = path.extname(filename);
-			const baseName = path.basename(filename, extension);
-			savePath = path.join(absoluteDir, `${this.sanitizeFilename(baseName)} (${counter})${extension}`);
-			counter++;
-		}
-		return savePath;
+		if (noticeMessage) new Notice(noticeMessage);
 	}
 
-	/** Проста санітизація імені файлу */
-	private sanitizeFilename(filename: string): string {
-		// Видаляємо символи, які не дозволені в іменах файлів у Windows/Mac/Linux
-		// Це базовий приклад, можна вдосконалити
-		return filename.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').replace(/^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$/i, '_$1$2');
+	/** Initiates sending a file selected by the user */
+	async initiateSendFile(file: File, recipientNickname: string | null): Promise<void> {
+		if (!this.networkManager) { new Notice("Network service not ready."); return; }
+		if (recipientNickname !== null && !this.userDiscovery) { new Notice("User discovery not ready."); return; }
+
+		const fileId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+		const filename = file.name;
+		const size = file.size;
+
+		// --- CRITICAL TODO: Implement reliable filePath retrieval ---
+		// This placeholder WILL NOT WORK in a real scenario.
+		// Suggestion: Copy the file to plugin's data dir using vault adapter's writeBinary
+		// and use the path to the copy. This requires careful management of temporary files.
+		const filePath = (file as any).path || `PLACEHOLDER_PATH/${filename}`;
+		if (filePath.startsWith("PLACEHOLDER_PATH")) {
+			new Notice("Error: File path determination not implemented.", 10000); // Show longer
+			console.error("initiateSendFile: CRITICAL - File path determination needs implementation!");
+			return;
+		}
+		// ------------------------------------------------------------
+
+		this.outgoingFileOffers.set(fileId, { fileId, filePath, filename, size, recipientNickname });
+		console.log(`[${this.manifest.name}] Initiating file send: ${filename} (ID: ${fileId})`);
+		this.chatView?.displayUploadProgress({ fileId, filename, size, recipientNickname }); // Show placeholder in UI
+
+		const fileOfferPayload = { type: 'fileOffer', senderNickname: this.settings.userNickname, fileId, filename, size };
+		const nm = this.networkManager;
+		const ud = this.userDiscovery;
+		let noticeMessage: string | null = null;
+
+		try {
+			if (recipientNickname === null) { // Broadcast offer
+				const recipients = ud ? ud.getAllUsers().filter(u => u.nickname !== this.settings.userNickname) : [];
+				if (recipients.length === 0) throw new Error("No users found to send file offer.");
+				const sendPromises = recipients.map(user => nm.sendData(user.ip, user.port, fileOfferPayload).catch(err => console.warn(`Failed sending fileOffer broadcast to ${user.nickname}: ${err.message}`)));
+				await Promise.all(sendPromises);
+				console.log(`[${this.manifest.name}] File offer ${fileId} broadcasted.`);
+			} else { // Private offer
+				const userInfo = ud ? ud.getUserInfo(recipientNickname) : null;
+				if (!userInfo) throw new Error(`User ${recipientNickname} not found.`);
+				await nm.sendData(userInfo.ip, userInfo.port, fileOfferPayload);
+				console.log(`[${this.manifest.name}] File offer ${fileId} sent to ${recipientNickname}.`);
+			}
+		} catch (error: any) {
+			console.error(`[${this.manifest.name}] Error sending fileOffer for ${fileId}:`, error);
+			noticeMessage = `Error sending file offer: ${error.message}`;
+			this.outgoingFileOffers.delete(fileId); // Clean up state
+			this.chatView?.updateFileProgress?.(fileId, 'upload', 0, size, 'error'); // Update UI
+		}
+		if (noticeMessage) new Notice(noticeMessage);
 	}
 
-
-	// --- Публічні методи, які може викликати ChatView ---
-
-	// Перевизначаємо метод з попереднього прикладу, щоб він використовував NetworkManager
-	// async sendMessage(recipientNickname: string | null, message: string): Promise<void> {
-	// 	if (!this.networkManager) {
-	// 		new Notice("Мережевий менеджер не активний.");
-	// 		return;
-	// 	}
-
-	// 	const senderNickname = this.settings.userNickname;
-	// 	const timestamp = Date.now();
-	// 	const payload = {
-	// 		type: 'text',
-	// 		senderNickname: senderNickname,
-	// 		content: message,
-	// 		timestamp: timestamp
-	// 	};
-
-	// 	let sent = false; // Флаг успішного надсилання хоча б одному
-
-	// 	try {
-	// 		if (recipientNickname === null) { // Broadcast
-	// 			// const recipients = this.userDiscovery?.getAllUsers().filter(u => u.nickname !== senderNickname) || [];
-	// 			const recipients: Array<{ nickname: string, ip: string, port: number }> = []; // Заглушка, потрібен UserDiscovery
-	// 			if (recipients.length === 0) {
-	// 				console.log("Немає отримувачів для broadcast.");
-	// 				// Чи показувати власне повідомлення, якщо нема кому слати?
-	// 			}
-	// 			const sendPromises = recipients.map(user =>
-	// 				this.networkManager!.sendData(user.ip, user.port, payload)
-	// 					.then(() => { sent = true; })
-	// 					.catch(err => console.warn(`Помилка надсилання broadcast до ${user.nickname}: ${err.message}`))
-	// 			);
-	// 			await Promise.all(sendPromises);
-	// 		} else { // Private
-	// 			// const userInfo = this.userDiscovery?.getUserInfo(recipientNickname);
-	// 			const userInfo: { nickname: string, ip: string, port: number } | null = null; // Заглушка
-	// 			if (userInfo) {
-	// 				await this.networkManager.sendData(userInfo.ip, userInfo.port, payload);
-	// 				sent = true;
-	// 			} else {
-	// 				new Notice(`Користувач ${recipientNickname} не знайдений.`);
-	// 			}
-	// 		}
-
-	// 		if (sent || recipientNickname === null) { // Показуємо своє, якщо broadcast або успішне приватне
-	// 			this.chatView?.displayMessage(senderNickname, message, timestamp, true);
-	// 			// TODO: Зберегти в історію
-	// 		}
-	// 	} catch (error: any) {
-	// 		console.error("Помилка надсилання повідомлення:", error);
-	// 		new Notice(`Помилка надсилання: ${error.message}`);
-	// 	}
-	// }
-
-	// Перевизначаємо метод, щоб він використовував NetworkManager
+	/** Accepts an incoming file offer received previously */
 	async acceptFileOffer(senderNickname: string, fileId: string): Promise<void> {
-		if (!this.networkManager) {
-			console.error(`[${this.manifest.name}] acceptFileOffer: NetworkManager is not initialized.`);
-			new Notice("Мережевий сервіс не активний.");
-			return;
-		}
+		if (!this.networkManager) { new Notice("Network service not ready."); return; }
 		const offer = this.incomingFileOffers.get(fileId);
-		if (!offer) {
-			console.error(`[${this.manifest.name}] acceptFileOffer: Не знайдено інформацію про вхідну пропозицію файлу ${fileId}`);
-			new Notice("Помилка: Пропозицію файлу не знайдено.");
-			return;
+		if (!offer) { new Notice("Error: File offer not found or already handled."); return; }
+
+		let senderInfo: UserInfo | null = this.userDiscovery?.getUserInfo(senderNickname) || null;
+		if (!senderInfo && offer.senderAddress) { // Fallback to stored address
+			const parts = offer.senderAddress.split(':');
+			if (parts.length === 2) { const port = parseInt(parts[1]); if (parts[0] && !isNaN(port)) senderInfo = { nickname: senderNickname, ip: parts[0], port }; }
 		}
-
-		// Оголошуємо через 'let', щоб дозволити переприсвоєння
-		let senderInfo: { nickname: string, ip: string, port: number } | null = null;
-
-		// Спочатку намагаємося знайти користувача через UserDiscovery (якщо він реалізований)
-		if (this.userDiscovery) {
-			senderInfo = this.userDiscovery.getUserInfo(senderNickname);
-		}
-
-		// Якщо UserDiscovery не знайшов користувача (або не існує),
-		// намагаємося використати збережену адресу з пропозиції
-		if (!senderInfo) {
-			console.log(`[${this.manifest.name}] acceptFileOffer: Користувач ${senderNickname} не знайдений через UserDiscovery, спроба використати збережену адресу ${offer.senderAddress}`);
-			const addrParts = offer.senderAddress?.split(':'); // Перевіряємо наявність senderAddress
-
-			if (offer.senderAddress && addrParts && addrParts.length === 2) {
-				const ip = addrParts[0];
-				const port = parseInt(addrParts[1]);
-
-				if (ip && !isNaN(port)) {
-					// Тепер присвоєння можливе, бо senderInfo оголошено через 'let'
-					senderInfo = { nickname: senderNickname, ip: ip, port: port };
-					console.log(`[${this.manifest.name}] acceptFileOffer: Використовуємо збережену адресу ${ip}:${port} для ${senderNickname}`);
-				} else {
-					new Notice(`Не вдалося розпізнати збережену адресу для ${senderNickname}`);
-					console.error(`[${this.manifest.name}] acceptFileOffer: Не вдалося розпарсити збережену адресу: ${offer.senderAddress}`);
-					return; // Не можемо продовжити без коректної адреси
-				}
-			} else {
-				// Немає збереженої адреси АБО користувача не знайдено через UserDiscovery
-				new Notice(`Не вдалося знайти адресу відправника ${senderNickname}`);
-				console.error(`[${this.manifest.name}] acceptFileOffer: Не вдалося отримати адресу відправника для ${senderNickname} (fileId: ${fileId})`);
-				return; // Не можемо продовжити без адреси відправника
-			}
-		}
-
-		// Якщо ми дійшли сюди, senderInfo має містити валідні дані (або з UserDiscovery, або зі збереженої адреси)
+		if (!senderInfo) { new Notice(`Error: Cannot find address for sender ${senderNickname}.`); return; }
 
 		try {
 			const savePath = await this.determineSavePath(offer.filename);
-			console.log(`[${this.manifest.name}] acceptFileOffer: Прийняття файлу ${fileId}. Шлях збереження: ${savePath}`);
-
-			// Готуємо NM до прийому файлу
-			// Передаємо senderInfo!.ip і senderInfo!.port, бо ми впевнені, що senderInfo не null на цьому етапі
+			console.log(`[${this.manifest.name}] Accepting file ${fileId}. Save path: ${savePath}`);
 			await this.networkManager.prepareToReceiveFile(fileId, savePath, offer.size, `${senderNickname} (${senderInfo!.ip}:${senderInfo!.port})`);
-
-			// Надсилаємо підтвердження відправнику
-			const payload = { type: 'fileAccept', receiverNickname: this.settings.userNickname, fileId: fileId };
+			const payload = { type: 'fileAccept', receiverNickname: this.settings.userNickname, fileId };
 			await this.networkManager.sendData(senderInfo!.ip, senderInfo!.port, payload);
-
-			console.log(`[${this.manifest.name}] acceptFileOffer: Підтвердження прийняття ${fileId} надіслано до ${senderNickname}. Очікування даних...`);
-			// UI має оновитися через callback onFileTransferStart або подібний
-
+			console.log(`[${this.manifest.name}] Acceptance for ${fileId} sent. Waiting for data...`);
 		} catch (error: any) {
-			console.error(`[${this.manifest.name}] acceptFileOffer: Помилка під час прийняття файлу ${fileId}:`, error);
-			new Notice(`Помилка при прийнятті файлу: ${error.message}`);
-			// Потрібно очистити стан, якщо prepareToReceiveFile не вдалося
-			// Доступ до приватних полів не є ідеальним, краще мати публічний метод очищення в NetworkManager
-			if (this.networkManager && (this.networkManager as any)['receivingFiles']?.has(fileId)) {
-				(this.networkManager as any)['_cleanupReceivingFile'](fileId, error);
-			}
+			console.error(`[${this.manifest.name}] Error accepting file ${fileId}:`, error);
+			new Notice(`Error accepting file: ${error.message}`);
+			if (this.networkManager && (this.networkManager as any)['receivingFiles']?.has(fileId)) { (this.networkManager as any)['_cleanupReceivingFile'](fileId, error); }
+			this.incomingFileOffers.delete(fileId);
+			this.chatView?.updateFileProgress?.(fileId, 'download', 0, offer.size, 'error');
 		}
 	}
 
-	// У файлі main.ts всередині класу LocalChatPlugin
-
+	/** Declines an incoming file offer */
 	async declineFileOffer(senderNickname: string, fileId: string): Promise<void> {
-		// 1. Перевірка NetworkManager
-		if (!this.networkManager) {
-			console.error(`[${this.manifest.name}] declineFileOffer: NetworkManager is not initialized.`);
-			// Не показуємо Notice, користувач сам ініціював дію
-			return;
-		}
-
-		// 2. Отримання інформації про пропозицію
+		if (!this.networkManager) { console.error("NM not ready"); return; } // No notice, user action
 		const offer = this.incomingFileOffers.get(fileId);
-		if (!offer) {
-			// Пропозиції вже немає, можливо, вона була видалена раніше
-			console.warn(`[${this.manifest.name}] declineFileOffer: Cannot decline non-existent or already handled offer ${fileId}`);
-			// Намагаємось оновити UI про всяк випадок, якщо елемент залишився
-			this.chatView?.updateFileProgress?.(fileId, 'download', 0, 0, 'declined');
-			return;
+		if (!offer) { this.chatView?.updateFileProgress?.(fileId, 'download', 0, 0, 'declined'); return; } // Already handled
+
+		let senderInfo: UserInfo | null = this.userDiscovery?.getUserInfo(senderNickname) || null;
+		if (!senderInfo && offer.senderAddress) { // Fallback
+			const parts = offer.senderAddress.split(':');
+			if (parts.length === 2) { const port = parseInt(parts[1]); if (parts[0] && !isNaN(port)) senderInfo = { nickname: senderNickname, ip: parts[0], port }; }
 		}
 
-		// 3. Визначення адреси відправника
-		let senderInfo: UserInfo | null = null;
-		// Намагаємося отримати актуальну інформацію (якщо UserDiscovery працює)
-		if (this.userDiscovery) {
-			senderInfo = this.userDiscovery.getUserInfo(senderNickname);
-		}
-
-		// Якщо не знайдено або UserDiscovery немає, використовуємо збережену адресу
-		if (!senderInfo && offer.senderAddress) {
-			console.log(`[${this.manifest.name}] declineFileOffer: User ${senderNickname} not found live, using stored address ${offer.senderAddress}`);
-			const addrParts = offer.senderAddress.split(':');
-			if (addrParts.length === 2) {
-				const ip = addrParts[0];
-				const port = parseInt(addrParts[1]);
-				if (ip && !isNaN(port)) {
-					senderInfo = { nickname: senderNickname, ip: ip, port: port }; // Присвоюємо, бо 'let'
-				} else {
-					console.warn(`[${this.manifest.name}] declineFileOffer: Failed to parse stored address ${offer.senderAddress}`);
-					// Не можемо надіслати відповідь, але все одно відхилимо локально
-				}
-			}
-		}
-
-		// 4. Надсилання повідомлення про відмову (якщо адреса відома)
 		if (senderInfo) {
-			// Всередині цього блоку 'senderInfo' гарантовано не null (логічно)
-			const payload = { type: 'fileDecline', receiverNickname: this.settings.userNickname, fileId: fileId };
-			try {
-				// Використовуємо non-null assertion '!' для підказки TypeScript
-				await this.networkManager.sendData(senderInfo!.ip, senderInfo!.port, payload);
-				console.log(`[${this.manifest.name}] Decline message for file ${fileId} sent to ${senderNickname}.`);
-			} catch (error: any) {
-				// Логуємо помилку, але продовжуємо локальне відхилення
-				console.warn(`[${this.manifest.name}] Failed to send decline message for ${fileId} to ${senderNickname}: ${error.message}`);
-			}
+			const payload = { type: 'fileDecline', receiverNickname: this.settings.userNickname, fileId };
+			// Send decline message, but don't wait or error out if it fails
+			this.networkManager.sendData(senderInfo!.ip, senderInfo!.port, payload)
+				.then(() => console.log(`[${this.manifest.name}] Decline message for ${fileId} sent.`))
+				.catch(error => console.warn(`[${this.manifest.name}] Failed sending decline message for ${fileId}: ${error.message}`));
 		} else {
-			// Не вдалося визначити адресу відправника
-			console.warn(`[${this.manifest.name}] Sender ${senderNickname} address unknown, cannot send decline message for ${fileId}. Declining locally.`);
+			console.warn(`[${this.manifest.name}] Sender ${senderNickname} not found, cannot send decline for ${fileId}.`);
 		}
-
-		// 5. Завжди видаляємо пропозицію з локального стану та оновлюємо UI
+		// Always cleanup locally and update UI immediately
 		this.incomingFileOffers.delete(fileId);
-		console.log(`[${this.manifest.name}] Removed incoming offer ${fileId} locally.`);
-		// Оновлюємо UI, щоб показати статус "Відхилено"
 		this.chatView?.updateFileProgress?.(fileId, 'download', 0, offer.size || 0, 'declined');
 	}
 
-	// --- Методи для Роботи з Налаштуваннями ---
+	// --- Settings Management ---
 	async loadSettings() {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
 	}
 
 	async saveSettings() {
 		await this.saveData(this.settings);
-		// TODO: Повідомити мережеві компоненти про можливі зміни (нік, порт)
-		// наприклад: this.userDiscovery?.updateSettings(this.settings);
-		//           this.networkManager?.updateSettings(this.settings);
+		// TODO: Notify NetworkManager/UserDiscovery if nickname/port changed and handle restart/update logic
+		console.log(`[${this.manifest.name}] Settings saved.`);
 	}
 
-	// --- Метод для Активації/Відкриття View Чату ---
+	// У файлі main.ts всередині класу LocalChatPlugin
+
+	// У файлі main.ts всередині класу LocalChatPlugin
+
 	async activateView() {
-		// Перевіряємо, чи View вже існує
-		const existingLeaves = this.app.workspace.getLeavesOfType(CHAT_VIEW_TYPE);
+		const { workspace } = this.app;
+		let leafToReveal: WorkspaceLeaf | null = null; // Використовуємо нове ім'я для ясності
+
+		// 1. Шукаємо існуючу панель нашого типу
+		const existingLeaves = workspace.getLeavesOfType(CHAT_VIEW_TYPE);
 		if (existingLeaves.length > 0) {
-			// Якщо існує, просто активуємо її
-			this.app.workspace.revealLeaf(existingLeaves[0]);
+			leafToReveal = existingLeaves[0]; // Знайшли існуючу
+			console.log(`[${this.manifest.name}] activateView: Revealing existing leaf.`);
 		} else {
-			// Якщо не існує, створюємо нову панель праворуч
-			const leaf = this.app.workspace.getRightLeaf(false);
-			if (leaf) {
-				await leaf.setViewState({
-					type: CHAT_VIEW_TYPE,
-					active: true,
-				});
-				this.app.workspace.revealLeaf(leaf);
+			// 2. Якщо існуючої немає, створюємо нову
+			console.log(`[${this.manifest.name}] activateView: Creating new leaf.`);
+			// Намагаємось створити праворуч
+			let newLeaf = workspace.getRightLeaf(false);
+			if (!newLeaf) {
+				// Якщо праворуч не вийшло, намагаємось ліворуч
+				console.log(`[${this.manifest.name}] activateView: Could not get right leaf, trying left.`);
+				newLeaf = workspace.getLeftLeaf(false);
+			}
+
+			// Перевіряємо, чи вдалося створити панель (ліворуч або праворуч)
+			if (newLeaf) {
+				leafToReveal = newLeaf; // Запам'ятовуємо створену панель
+				await leafToReveal.setViewState({ type: CHAT_VIEW_TYPE, active: true });
+				console.log(`[${this.manifest.name}] activateView: New leaf created and view state set.`);
 			} else {
-				console.error(`[${this.manifest.name}] Не вдалося отримати праву панель.`);
-				new Notice("Помилка: Не вдалося відкрити панель чату.");
+				// Якщо не вдалося створити ніде
+				console.error(`[${this.manifest.name}] activateView: Failed to get leaf for new view.`);
+				new Notice("Error: Could not open chat panel.");
+				return; // Виходимо з функції, бо панелі немає
 			}
 		}
-	}
 
-	// --- Обробники Подій від Мережевих Компонентів (Приклади) ---
-	/*
-	handleIncomingMessage(senderNickname: string, message: string, timestamp: number) {
-		console.log(`[${this.manifest.name}] Отримано повідомлення від ${senderNickname}: ${message}`);
-		if (this.chatView) {
-			this.chatView.displayMessage(senderNickname, message, timestamp, false); // false - не моє повідомлення
-			// TODO: Зберегти в історію, якщо ввімкнено
-			// TODO: Показати сповіщення?
+		// 3. Переконуємось, що маємо панель, та активуємо її
+		// Додаємо явну перевірку на null перед revealLeaf
+		if (leafToReveal) {
+			workspace.revealLeaf(leafToReveal); // Тепер TypeScript впевнений, що leafToReveal не null
 		} else {
-			// Якщо View закритий, показати сповіщення Obsidian
-			new Notice(`${senderNickname}: ${message.substring(0, 50)}${message.length > 50 ? '...' : ''}`);
+			// Цей блок не мав би виконатись через return вище, але про всяк випадок
+			console.error(`[${this.manifest.name}] activateView: leafToReveal is unexpectedly null before revealLeaf.`);
 		}
 	}
 
-	handleIncomingFileOffer(senderNickname: string, fileInfo: { fileId: string, filename: string, size: number }) {
-		console.log(`[${this.manifest.name}] Отримано пропозицію файлу ${fileInfo.filename} від ${senderNickname}`);
-		if (this.chatView) {
-			this.chatView.displayFileOffer(senderNickname, fileInfo);
-		} else {
-			new Notice(`Пропозиція файлу ${fileInfo.filename} від ${senderNickname}`);
-		}
+	// ... (решта коду класу LocalChatPlugin) ...
+
+	// ... (решта коду класу LocalChatPlugin) ...
+
+	// --- Helpers ---
+	private isChatViewActive(): boolean {
+		const activeLeaf = this.app.workspace.activeLeaf;
+		return !!activeLeaf && activeLeaf.getViewState().type === CHAT_VIEW_TYPE;
 	}
 
-	handleUserFound(userInfo: { nickname: string, ip: string, port: number }) {
-		console.log(`[${this.manifest.name}] Знайдено користувача: ${userInfo.nickname} (${userInfo.ip}:${userInfo.port})`);
-		if (this.chatView) {
-			this.chatView.addUserToList(userInfo);
-		}
-	}
+	private async determineSavePath(filename: string): Promise<string> {
+		let downloadDir = this.settings.downloadPath?.trim() || '';
+		let useDefaultAttachmentFolder = false;
 
-	handleUserLeft(userInfo: { nickname: string }) {
-		console.log(`[${this.manifest.name}] Користувач вийшов: ${userInfo.nickname}`);
-		if (this.chatView) {
-			this.chatView.removeUserFromList(userInfo.nickname);
-		}
-	}
-	*/
-
-	// --- Методи для Взаємодії з Мережею (Викликаються з ChatView) ---
-	/*
-	async sendMessage(recipientNickname: string, message: string) {
-		// Знайти IP/Port за ніком через userDiscovery або збережений список
-		// const recipientInfo = this.userDiscovery.getUserInfo(recipientNickname);
-		// if (recipientInfo) {
-		//	 await this.networkManager.sendMessage(recipientInfo.ip, recipientInfo.port, message);
-		//   if (this.chatView) {
-		//       this.chatView.displayMessage(this.settings.userNickname, message, Date.now(), true); // true - моє повідомлення
-		//   }
-		//	 // TODO: Зберегти в історію
-		// } else {
-		//    console.error(`[${this.manifest.name}] Не знайдено інформацію для ${recipientNickname}`);
-		//    new Notice(`Помилка: Користувач ${recipientNickname} не знайдений.`);
-		// }
-	}
-
-	async sendFile(recipientNickname: string, file: File) {
-		// Логіка надсилання файлу через networkManager
-	}
-	*/
-
-
-	/**
-	 * Метод викликається з ChatView, коли користувач обирає файл для надсилання.
-	 * Ініціює процес надсилання файлу: зберігає інформацію, показує в UI, надсилає пропозицію.
-	 * @param file Об'єкт File, отриманий з input[type=file]
-	 * @param recipientNickname Нік отримувача (або null для надсилання всім знайденим користувачам)
-	 */
-	async initiateSendFile(file: File, recipientNickname: string | null): Promise<void> {
-		// 1. Перевірка наявності необхідних сервісів
-		if (!this.networkManager) {
-			new Notice("Мережевий сервіс не активний.");
-			console.error(`[${this.manifest.name}] initiateSendFile: NetworkManager is not initialized.`);
-			return;
-		}
-		// Перевіряємо UserDiscovery тільки якщо це приватне повідомлення (recipientNickname не null)
-		if (recipientNickname !== null && !this.userDiscovery) {
-			new Notice("Сервіс виявлення користувачів не активний.");
-			console.warn(`[${this.manifest.name}] initiateSendFile: UserDiscovery is needed to send private file offer to ${recipientNickname}`);
-			return;
+		if (!downloadDir) {
+			useDefaultAttachmentFolder = true;
+			try {
+				// Using undocumented getConfig - safer inside try-catch
+				const attachmentPath = (this.app.vault as any).getConfig('attachmentFolderPath');
+				if (attachmentPath && typeof attachmentPath === 'string') {
+					downloadDir = attachmentPath.startsWith('/') ? attachmentPath.substring(1) : attachmentPath;
+				} else { downloadDir = ''; }
+			} catch (e) { downloadDir = ''; }
 		}
 
-		// 2. Підготовка інформації про файл
-		const fileId = `file_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-		const filename = file.name;
-		const size = file.size;
-
-		// 3. Обробка шляху до файлу (ВАЖЛИВА ЗАГЛУШКА!)
-		// Отримання реального шляху 'filePath' з об'єкту 'File' є нетривіальним
-		// завданням в Electron/Obsidian з міркувань безпеки.
-		// Потрібна реальна стратегія: копіювання файлу, використання FileSystemAdapter тощо.
-		// Поки що використовуємо ЗАГЛУШКУ. Якщо шлях не отримано, виходимо.
-		const filePath = (file as any).path || "НЕВІДОМИЙ_ШЛЯХ_ДО_ФАЙЛУ/" + filename; // ЗАГЛУШКА!
-		if (filePath.startsWith("НЕВІДОМИЙ_ШЛЯХ")) {
-			new Notice("Помилка: Неможливо отримати шлях до файлу для надсилання.", 5000);
-			console.error("initiateSendFile: Failed to determine file path for", filename);
-			return; // Не продовжуємо без шляху
-		}
-
-		// 4. Збереження інформації про вихідну пропозицію (включаючи розмір)
-		this.outgoingFileOffers.set(fileId, {
-			fileId,
-			filePath: filePath, // Зберігаємо отриманий (потенційно некоректний) шлях
-			filename,
-			size,              // Зберігаємо розмір
-			recipientNickname
-		});
-
-		console.log(`[${this.manifest.name}] Ініційовано надсилання файлу: ${filename} (${size} байт), ID: ${fileId}`);
-
-		// 5. Підготовка payload для мережевої пропозиції
-		const fileOfferPayload = {
-			type: 'fileOffer',
-			senderNickname: this.settings.userNickname,
-			fileId: fileId,
-			filename: filename,
-			size: size
-		};
-
-		// 6. Оновлення локального UI (показуємо, що почали надсилати)
-		// Цей метод має існувати в ChatView.ts
-		this.chatView?.displayUploadProgress({ fileId, filename, size, recipientNickname });
-
-		// 7. Надсилання пропозиції мережею
+		// Ensure download directory exists relative to vault root
 		try {
-			if (recipientNickname === null) { // Надіслати всім (Broadcast)
-				console.log(`[${this.manifest.name}] Надсилання fileOffer (broadcast) для ${fileId}`);
-				// const recipients = this.userDiscovery?.getAllUsers().filter(u => u.nickname !== this.settings.userNickname) || []; // Потребує UserDiscovery
-				const recipients: Array<{ nickname: string, ip: string, port: number }> = []; // ЗАГЛУШКА
-
-				if (recipients.length === 0) {
-					new Notice("Не знайдено активних користувачів для надсилання файлу.");
-					throw new Error("No recipients found for broadcast file offer."); // Генеруємо помилку, щоб спрацював catch
-				}
-
-				// Надсилаємо всім, логуємо індивідуальні помилки, але не зупиняємось
-				const sendPromises = recipients.map(user =>
-					this.networkManager!.sendData(user.ip, user.port, fileOfferPayload)
-						.catch(err => console.warn(`[${this.manifest.name}] Помилка надсилання fileOffer (broadcast) до ${user.nickname}: ${err.message}`))
-				);
-				await Promise.all(sendPromises);
-				console.log(`[${this.manifest.name}] Пропозицію файлу ${fileId} надіслано (broadcast). Очікування відповідей...`);
-
-			} else { // Надіслати конкретному користувачу (Private)
-				console.log(`[${this.manifest.name}] Надсилання fileOffer (private) для ${fileId} до ${recipientNickname}`);
-				// --- ВИПРАВЛЕНА ЧАСТИНА ---
-				const userInfo = this.userDiscovery?.getUserInfo(recipientNickname); // Використовуємо реальний виклик
-
-				if (userInfo) { // Перевіряємо, чи користувача знайдено
-					// Надсилаємо пропозицію
-					await this.networkManager.sendData(userInfo.ip, userInfo.port, fileOfferPayload); // Помилка 'never' тут зникне
-					console.log(`[${this.manifest.name}] Пропозицію файлу ${fileId} надіслано до ${recipientNickname}. Очікування відповіді...`);
+			const abstractFile = this.app.vault.getAbstractFileByPath(downloadDir);
+			// ЗАМІНІТЬ 'Folder' НА 'TFolder' В ЦЬОМУ РЯДКУ:
+			if (abstractFile && !(abstractFile instanceof TFolder)) {
+				console.warn(`[<span class="math-inline">\{this\.manifest\.name\}\] Specified download path '</span>{downloadDir}' exists but is not a folder. Using vault root.`);
+				downloadDir = ''; // Fallback to root if path is not a folder
+			} else if (!abstractFile) {
+				console.log(`[${this.manifest.name}] Creating download directory: ${downloadDir}`);
+				// Перевіряємо чи шлях не порожній перед створенням
+				if (downloadDir) {
+					await this.app.vault.createFolder(downloadDir);
 				} else {
-					// Користувача не знайдено сервісом UserDiscovery
-					throw new Error(`Користувач ${recipientNickname} не знайдений.`); // Генеруємо помилку, щоб спрацював catch
+					// Якщо downloadDir порожній (корінь сховища), нічого не створюємо
+					console.log(`[${this.manifest.name}] Download path is vault root, no need to create folder.`);
 				}
 			}
-		} catch (error: any) { // Перехоплюємо помилки (нема отримувачів, користувач не знайдений, помилка sendData)
-			console.error(`[${this.manifest.name}] Помилка під час надсилання fileOffer для ${fileId}:`, error);
-			new Notice(`Помилка надсилання пропозиції файлу: ${error.message}`);
-			this.outgoingFileOffers.delete(fileId); // Очищуємо стан пропозиції при помилці
-			// Оновлюємо UI, показуючи помилку
-			this.chatView?.updateFileProgress?.(fileId, 'upload', 0, size, 'error');
+			// Якщо abstractFile існує і є TFolder, нічого не робимо - папка вже існує
+		} catch (err) {
+			console.error(`[<span class="math-inline">\{this\.manifest\.name\}\] Error ensuring download directory '</span>{downloadDir}' exists, using vault root.`, err);
+			downloadDir = ''; // Fallback to root on error
 		}
+
+		// Get absolute base path using adapter (undocumented)
+		const adapter = this.app.vault.adapter as any;
+		if (typeof adapter.getBasePath !== 'function') { throw new Error("Cannot determine vault base path via adapter."); }
+		const vaultBasePath = adapter.getBasePath();
+		const absoluteDir = path.join(vaultBasePath, downloadDir);
+
+		// Handle filename conflicts reliably
+		let counter = 0;
+		const sanitizedOriginalName = this.sanitizeFilename(filename);
+		let finalFilename = sanitizedOriginalName;
+		let savePath = path.join(absoluteDir, finalFilename);
+		const maxAttempts = 100; // Safety limit
+
+		while (await this.adapterFileExists(savePath) && counter < maxAttempts) {
+			counter++;
+			const extension = path.extname(sanitizedOriginalName);
+			const baseName = path.basename(sanitizedOriginalName, extension);
+			finalFilename = `${baseName} (${counter})${extension}`;
+			savePath = path.join(absoluteDir, finalFilename);
+		}
+
+		if (counter >= maxAttempts) { throw new Error(`Failed to find unique filename for ${filename} after ${maxAttempts} attempts.`); }
+		console.log(`[${this.manifest.name}] Determined save path: ${savePath}`);
+		return savePath;
 	}
 
-
-	/**
-		 * Надсилає текстове повідомлення в мережу.
-		 * Показує повідомлення локально одразу.
-		 * @param recipientNickname - Нік отримувача або null для надсилання всім.
-		 * @param message - Текст повідомлення.
-		 */
-	async sendMessage(recipientNickname: string | null, message: string): Promise<void> {
-		const senderNickname = this.settings.userNickname;
-		const timestamp = Date.now();
-
-		// 1. Перевірка та підготовка повідомлення
-		if (!message?.trim()) {
-			console.log(`[${this.manifest.name}] Спроба надіслати порожнє повідомлення.`);
-			return;
-		}
-		const trimmedMessage = message.trim();
-
-		// 2. Негайне відображення та збереження локально
-		// Показуємо своє повідомлення в UI
-		this.chatView?.displayMessage(senderNickname, trimmedMessage, timestamp, true); // true = isOwn
-
-		// TODO: Реалізувати та викликати збереження в історію
-		// if (this.settings.saveHistory) {
-		//     this.addMessageToHistory({ /* ... дані повідомлення ... */ });
-		// }
-
-		// 3. Перевірка мережевих компонентів та присвоєння локальним змінним
-		if (!this.networkManager || !this.userDiscovery) { // Перевірка на null
-			console.error(`[${this.manifest.name}] sendMessage: NetworkManager або UserDiscovery не ініціалізовано.`);
-			new Notice("Помилка: Мережеві компоненти не готові для надсилання.");
-			// TODO: Оновити статус повідомлення в історії на 'failed'
-			return;
-		}
-		// Присвоєння локальним константам після перевірки на null
-		// TypeScript тепер знає, що nm та ud не null в цьому скоупі
-		const nm = this.networkManager;
-		const ud = this.userDiscovery;
-
-		// 4. Підготовка мережевого payload
-		const payload = {
-			type: 'text',
-			senderNickname: senderNickname,
-			content: trimmedMessage,
-			timestamp: timestamp
-		};
-
-		// 5. Надсилання мережею
+	// Helper to check file existence using Obsidian adapter
+	private async adapterFileExists(absolutePath: string): Promise<boolean> {
 		try {
-			if (recipientNickname === null) {
-				// --- Broadcast ---
-				console.log(`[${this.manifest.name}] Надсилання повідомлення (broadcast)...`);
-				// Явно вказуємо тип UserInfo[] для результату getAllUsers (якщо він такий)
-				const allUsers: UserInfo[] = ud.getAllUsers(); // ЗАГЛУШКА: Потрібна реалізація UserDiscovery
-				// Явно вказуємо тип user: UserInfo в filter
-				const recipients = allUsers.filter((user: UserInfo) => user.nickname !== senderNickname);
-
-				if (recipients.length === 0) {
-					console.log(`[${this.manifest.name}] Немає отримувачів для broadcast.`);
-					// Повідомлення вже відображено локально, просто виходимо
-					return;
-				}
-
-				// Використовуємо Promise.allSettled для обробки індивідуальних помилок
-				// Явно вказуємо тип user: UserInfo в map
-				const sendPromises = recipients.map((user: UserInfo) =>
-					nm.sendData(user.ip, user.port, payload)
-						.catch(err => {
-							// Обгортаємо помилку в об'єкт для кращого звітування
-							return Promise.reject({ nickname: user.nickname, address: `${user.ip}:${user.port}`, error: err });
-						})
-				);
-
-				const results = await Promise.allSettled(sendPromises);
-
-				// Обробка результатів надсилання
-				const failedSends = results.filter(r => r.status === 'rejected') as PromiseRejectedResult[];
-				if (failedSends.length > 0) {
-					console.warn(`[${this.manifest.name}] Не вдалося надіслати broadcast ${failedSends.length} отримувачам:`);
-					failedSends.forEach(failure => {
-						const reason = failure.reason as { nickname: string, address: string, error: Error };
-						console.warn(`  - До ${reason.nickname} (${reason.address}): ${reason.error.message}`);
-						// TODO: Опціонально позначити користувача як офлайн або оновити статус повідомлення для нього
-					});
-					// new Notice(`Помилка надсилання до ${failedSends.length} отримувачів.`);
-				} else {
-					console.log(`[${this.manifest.name}] Broadcast повідомлення успішно ініційовано для ${recipients.length} отримувачів.`);
-					// TODO: Оновити статус повідомлення в історії на 'sent'/'delivered'?
-				}
-
-			} else {
-				// --- Приватне повідомлення ---
-				console.log(`[${this.manifest.name}] Надсилання приватного повідомлення до ${recipientNickname}...`);
-				// Явно вказуємо тип UserInfo | null для результату getUserInfo (якщо він такий)
-				const recipientInfo: UserInfo | null = ud.getUserInfo(recipientNickname); // ЗАГЛУШКА: Потрібна реалізація UserDiscovery
-
-				if (recipientInfo) {
-					try {
-						// Використовуємо recipientInfo.ip / recipientInfo.port
-						await nm.sendData(recipientInfo.ip, recipientInfo.port, payload);
-						console.log(`[${this.manifest.name}] Приватне повідомлення успішно надіслано до ${recipientNickname}.`);
-						// TODO: Оновити статус повідомлення в історії
-					} catch (error: any) {
-						console.error(`[${this.manifest.name}] Помилка надсилання приватного повідомлення до ${recipientNickname} (${recipientInfo.ip}:${recipientInfo.port}):`, error);
-						new Notice(`Помилка надсилання повідомлення до ${recipientNickname}: ${error.message}`);
-						// TODO: Оновити статус повідомлення в історії на 'failed'
-					}
-				} else {
-					console.error(`[${this.manifest.name}] Отримувача не знайдено: ${recipientNickname}`);
-					new Notice(`Помилка: Користувач ${recipientNickname} не знайдений або офлайн.`);
-					// TODO: Оновити статус повідомлення в історії на 'failed'
-				}
+			const adapter = this.app.vault.adapter as any;
+			if (typeof adapter.getBasePath !== 'function' || typeof adapter.stat !== 'function') {
+				// Fallback if adapter methods are missing
+				return fs.existsSync(absolutePath);
 			}
-		} catch (error) { // Перехоплення неочікуваних помилок (наприклад, якщо getAllUsers/getUserInfo небезпечні)
-			console.error(`[${this.manifest.name}] Неочікувана помилка в sendMessage:`, error);
-			new Notice("Неочікувана помилка надсилання повідомлення.");
-			// TODO: Оновити статус повідомлення в історії на 'failed'
+			const vaultBasePath = adapter.getBasePath();
+			const vaultRelativePath = path.relative(vaultBasePath, absolutePath).replace(/\\/g, '/'); // Use forward slashes for Obsidian API
+
+			if (!vaultRelativePath || vaultRelativePath.startsWith('..')) {
+				console.warn(`[${this.manifest.name}] Calculated relative path is outside vault: ${vaultRelativePath}. Checking with fs.existsSync.`);
+				return fs.existsSync(absolutePath); // Fallback if path seems outside vault
+			}
+
+			const stats = await adapter.stat(vaultRelativePath);
+			return !!stats; // Exists if stat doesn't error and returns stats
+		} catch (e: any) {
+			// stat throws error if not found, check error code if possible (though unreliable across adapters)
+			// console.debug(`Adapter stat error for ${absolutePath}: ${e.message}`);
+			return false;
 		}
 	}
 
-	// // --- Метод для прийняття пропозиції файлу ---
-	// async acceptFileOffer(senderNickname: string, fileId: string): Promise<void> {
-	// 	if (!this.networkManager || !this.userDiscovery) {
-	// 		console.error(`[${this.manifest.name}] NetworkManager або UserDiscovery не ініціалізовано.`);
-	// 		new Notice("Помилка: Мережеві компоненти не готові.");
-	// 		return;
-	// 	}
+	private sanitizeFilename(filename: string): string {
+		// Remove characters forbidden in Windows/macOS/Linux filenames & reserved names
+		const forbiddenChars = /[<>:"/\\|?*\x00-\x1F]/g;
+		const reservedNames = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?$/i;
+		let sanitized = filename.replace(forbiddenChars, '_');
+		if (reservedNames.test(sanitized)) {
+			sanitized = `_${sanitized}`;
+		}
+		return sanitized.trim() || "downloaded_file"; // Ensure not empty
+	}
 
-	// 	const senderInfo = this.userDiscovery.getUserInfo(senderNickname);
-	// 	if (!senderInfo) {
-	// 		console.error(`[${this.manifest.name}] Не знайдено інформацію для відправника ${senderNickname} при прийнятті файлу ${fileId}.`);
-	// 		new Notice(`Помилка: Відправник ${senderNickname} не знайдений.`);
-	// 		return;
-	// 	}
+} // End of LocalChatPlugin class
 
-	// 	console.log(`[${this.manifest.name}] Прийняття файлу ${fileId} від ${senderNickname}`);
+// --- Settings Tab Class ---
+// Included here for completeness, assuming it's in a separate file normally
+// and importing DEFAULT_SETTINGS and LocalChatPlugin
+// import { DEFAULT_SETTINGS } from './main'; // Assuming this file is main.ts
 
-	// 	const payload = {
-	// 		type: 'fileAccept',
-	// 		receiverNickname: this.settings.userNickname,
-	// 		fileId: fileId
-	// 	};
-
-	// 	try {
-	// 		// Повідомляємо відправника про згоду
-	// 		await this.networkManager.sendData(senderInfo.ip, senderInfo.port, payload);
-
-	// 		// TODO: Підготувати NetworkManager до отримання даних для fileId
-	// 		// Наприклад:
-	// 		// const fileDetails = this.getPendingFileOfferDetails(fileId); // Отримати ім'я, розмір
-	// 		// if (fileDetails) {
-	// 		//    const savePath = await this.determineSavePath(fileDetails.filename); // Визначити шлях збереження
-	// 		//    await this.networkManager.prepareToReceiveFile(fileId, savePath);
-	// 		//    console.log(`[${this.manifest.name}] Готовий отримувати файл ${fileId} в ${savePath}`);
-	// 		//    // Можливо, оновити UI в ChatView, показати "Очікування завантаження..."
-	// 		//    this.chatView?.updateFileOfferStatus(fileId, 'accepted');
-	// 		// } else {
-	// 		//    console.error(`[${this.manifest.name}] Не знайдено деталей пропозиції для файлу ${fileId}`);
-	// 		//    throw new Error("File offer details not found"); // Генеруємо помилку, щоб відправити відмову або сповістити користувача
-	// 		// }
-	// 		console.log(`[${this.manifest.name}] Підтвердження прийняття файлу ${fileId} надіслано до ${senderNickname}`);
-
-	// 	} catch (error) {
-	// 		console.error(`[${this.manifest.name}] Помилка надсилання підтвердження прийняття файлу ${fileId} до ${senderNickname}:`, error);
-	// 		new Notice(`Помилка прийняття файлу від ${senderNickname}.`);
-	// 		// TODO: Можливо, потрібно відправити 'fileDecline' або очистити стан?
-	// 	}
-	// 	// }
-
-
-	// 	// --- Метод для відхилення пропозиції файлу ---
-	// 	async declineFileOffer(senderNickname: string, fileId: string): Promise<void> {
-	// 		if (!this.networkManager || !this.userDiscovery) {
-	// 			console.error(`[${this.manifest.name}] NetworkManager або UserDiscovery не ініціалізовано.`);
-	// 			// Не показуємо Notice користувачу, бо він сам натиснув "Відхилити"
-	// 			return;
-	// 		}
-
-	// 		const senderInfo = this.userDiscovery.getUserInfo(senderNickname);
-	// 		if (!senderInfo) {
-	// 			console.warn(`[${this.manifest.name}] Не знайдено інформацію для відправника ${senderNickname} при відхиленні файлу ${fileId}. Можливо, він вже офлайн.`);
-	// 			// Не потрібно нічого надсилати, якщо відправник невідомий
-	// 			// TODO: Очистити локальний стан пропозиції файлу, якщо він є
-	// 			// this.removePendingFileOffer(fileId);
-	// 			return;
-	// 		}
-
-	// 		console.log(`[${this.manifest.name}] Відхилення файлу ${fileId} від ${senderNickname}`);
-
-	// 		const payload = {
-	// 			type: 'fileDecline',
-	// 			receiverNickname: this.settings.userNickname,
-	// 			fileId: fileId
-	// 		};
-
-	// 		try {
-	// 			// Повідомляємо відправника про відмову
-	// 			await this.networkManager.sendData(senderInfo.ip, senderInfo.port, payload);
-	// 			console.log(`[${this.manifest.name}] Відмова від файлу ${fileId} надіслана до ${senderNickname}`);
-
-	// 			// TODO: Очистити локальний стан пропозиції файлу
-	// 			// this.removePendingFileOffer(fileId);
-	// 			// Можливо, оновити UI в ChatView
-	// 			// this.chatView?.updateFileOfferStatus(fileId, 'declined');
-
-	// 		} catch (error) {
-	// 			console.error(`[${this.manifest.name}] Помилка надсилання відмови від файлу ${fileId} до ${senderNickname}:`, error);
-	// 			// Не турбуємо користувача повідомленням, бо він вже відхилив
-	// 		}
-	// 	}
-}
-
-// --- Клас для Сторінки Налаштувань ---
 class ChatSettingTab extends PluginSettingTab {
 	plugin: LocalChatPlugin;
 
@@ -1041,41 +625,63 @@ class ChatSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
-		containerEl.createEl('h2', { text: 'Налаштування Локального Чату' });
+		containerEl.createEl('h2', { text: 'Local Chat Settings' });
 
+		// Nickname Setting
 		new Setting(containerEl)
-			.setName('Ваш Псевдонім')
-			.setDesc('Як вас бачитимуть інші користувачі в мережі.')
+			.setName('Your Nickname')
+			.setDesc('How you will appear to others on the network.')
 			.addText(text => text
-				.setPlaceholder('Введіть псевдонім')
+				.setPlaceholder('Enter nickname')
 				.setValue(this.plugin.settings.userNickname)
 				.onChange(async (value) => {
-					this.plugin.settings.userNickname = value.trim() || DEFAULT_SETTINGS.userNickname; // Не дозволяємо порожній нік
+					this.plugin.settings.userNickname = value?.trim() || DEFAULT_SETTINGS.userNickname;
 					await this.plugin.saveSettings();
+					// TODO: Notify UserDiscovery about nickname change if it's running
+					// this.plugin.userDiscovery?.updateNickname?.(this.plugin.settings.userNickname);
 				}));
 
+		// Port Setting
 		new Setting(containerEl)
-			.setName('Порт для прослуховування')
-			.setDesc('TCP порт, який буде використовувати плагін. Потребує перезапуску Obsidian для застосування.')
+			.setName('Listening Port')
+			.setDesc('TCP port the plugin will use. Requires Obsidian restart to apply.')
 			.addText(text => text
 				.setPlaceholder(String(DEFAULT_SETTINGS.listenPort))
 				.setValue(String(this.plugin.settings.listenPort))
 				.onChange(async (value) => {
 					const port = parseInt(value);
+					let portChanged = false;
 					if (!isNaN(port) && port > 1024 && port < 65535) {
-						this.plugin.settings.listenPort = port;
-					} else {
-						// Якщо введено некоректне значення, скидаємо до дефолтного (або попереднього)
+						if (this.plugin.settings.listenPort !== port) {
+							this.plugin.settings.listenPort = port;
+							portChanged = true;
+						}
+					} else if (value !== String(this.plugin.settings.listenPort)) {
 						text.setValue(String(this.plugin.settings.listenPort));
-						new Notice("Некоректний порт. Введіть число від 1025 до 65534.");
+						new Notice("Invalid port. Enter a number between 1025 and 65534.");
 					}
-					// Примітка: Збереження відбувається, але для реального застосування порту потрібен перезапуск
+					if (portChanged) {
+						await this.plugin.saveSettings();
+						new Notice("Port changed. Restart Obsidian for the change to take effect.");
+					}
+				}));
+
+		// Download Path Setting
+		new Setting(containerEl)
+			.setName('Download Folder')
+			.setDesc('Where to save received files. Leave empty to use the vault attachment folder (relative to vault root).')
+			.addText(text => text
+				.setPlaceholder('e.g., ChatDownloads')
+				.setValue(this.plugin.settings.downloadPath)
+				.onChange(async (value) => {
+					this.plugin.settings.downloadPath = value?.trim() || '';
 					await this.plugin.saveSettings();
 				}));
 
+		// Save History Setting
 		new Setting(containerEl)
-			.setName('Зберігати історію чату')
-			.setDesc('Чи зберігати повідомлення між сесіями Obsidian.')
+			.setName('Save Chat History')
+			.setDesc('Whether to keep message history between Obsidian sessions.')
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.saveHistory)
 				.onChange(async (value) => {
@@ -1083,26 +689,6 @@ class ChatSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings();
 				}));
 
-		// TODO: Додати кнопку "Очистити історію чату" тут
-		// new Setting(containerEl)
-		//     .setName('Очистити історію')
-		//     .setDesc('Видаляє всі збережені повідомлення.')
-		//     .addButton(button => button
-		//         .setButtonText('Очистити')
-		//         .setWarning() // Робить кнопку червоною
-		//         .onClick(async () => {
-		//             // Показати підтвердження перед очисткою
-		//             if (confirm('Ви впевнені, що хочете видалити всю історію чату?')) {
-		//                 // TODO: Викликати метод очищення історії
-		//                 // await this.plugin.clearChatHistory();
-		//                 new Notice('Історію чату очищено.');
-		//             }
-		//         }));
+		// TODO: Add "Clear History" button
 	}
-
-
-
-
-
-
 }
