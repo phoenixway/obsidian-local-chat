@@ -61,7 +61,7 @@ export default class LocalChatPlugin extends Plugin {
 				try {
 					// // --- ЗМІНЕНИЙ БЛОК ІМПОРТУ ТА ПЕРЕВІРКИ ---
 					// // Використовуємо деструктуризацію для отримання іменованого експорту
-					// const { WebSocketServer } = await import('ws');
+					const { WebSocketServer } = await import('ws');
 
 					// // Додаткова перевірка, чи отримали ми функцію-конструктор
 					// if (typeof WebSocketServer !== 'function') {
