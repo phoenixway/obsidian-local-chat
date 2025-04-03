@@ -59,45 +59,28 @@ export default class LocalChatPlugin extends Plugin {
 			} else {
 				console.log(`${pluginName} Initializing in SERVER mode on port ${this.settings.serverPort}...`);
 				try {
-					// --- ВИКОРИСТАННЯ require('ws') ---
-					// Переконуємось, що 'ws' є external в esbuild і node_modules присутні
+					// // --- ЗМІНЕНИЙ БЛОК ІМПОРТУ ТА ПЕРЕВІРКИ ---
+					// // Використовуємо деструктуризацію для отримання іменованого експорту
+					// const { WebSocketServer } = await import('ws');
 
-					// Перевіряємо, чи функція require взагалі існує (має існувати в Electron)
-					if (typeof require === 'undefined') {
-						throw new Error("Node.js 'require' function is not available in this environment.");
-					}
+					// // Додаткова перевірка, чи отримали ми функцію-конструктор
+					// if (typeof WebSocketServer !== 'function') {
+					// 	// Якщо імпорт не вдався, логуємо структуру отриманого об'єкту для діагностики
+					// 	console.error("Failed to import WebSocketServer constructor correctly from 'ws' module. Imported object:", await import('ws'));
+					// 	throw new Error('WebSocketServer class could not be imported correctly.');
+					// }
+					// // --- КІНЕЦЬ ЗМІНЕНОГО БЛОКУ ---
 
-					// Виконуємо require для 'ws'
-					const ws_require = require('ws');
-					// Логуємо структуру отриманого об'єкта для діагностики
-					console.log(`[${pluginName}] Required 'ws' module structure:`, ws_require);
-
-					// Намагаємося отримати конструктор WebSocketServer.
-					// У бібліотеці 'ws' він зазвичай експортується як '.WebSocketServer' або іноді як '.Server'
-					const WSServerConstructor = ws_require.WebSocketServer || ws_require.Server;
-
-					// Перевіряємо, чи отримали ми функцію
-					if (typeof WSServerConstructor !== 'function') {
-						console.error(`[${pluginName}] Failed to find WebSocketServer constructor via require('ws'). Found:`, WSServerConstructor);
-						throw new Error('WebSocketServer class could not be obtained via require("ws"). Check console log for module structure.');
-					}
-					// --- Кінець логіки require('ws') ---
-
-					console.log(`[${pluginName}] WebSocketServer constructor obtained via require.`);
-
-					// Створюємо менеджер сервера, передаючи знайдений конструктор
 					this.webSocketServerManager = new WebSocketServerManager(
 						this.settings.serverPort,
 						this.settings.userNickname,
-						serverCallbacks, // Ваші визначені callbacks
-						WSServerConstructor // Передаємо конструктор
+						serverCallbacks,
+						WebSocketServer // Використовуємо імпортований конструктор
 					);
-
-					// Запускаємо сервер
-					await this.webSocketServerManager!.start(); // Використовуємо '!', бо щойно створили
-
-					this.handleUserFound({ nickname: this.settings.userNickname }); // Додаємо себе до списку
+					await this.webSocketServerManager.start();
+					this.handleUserFound({ nickname: this.settings.userNickname });
 					new Notice(`${this.manifest.name}: Server started on port ${this.settings.serverPort}.`);
+
 
 				} catch (error: any) {
 					console.error(`${pluginName} CRITICAL ERROR starting WebSocket server:`, error);
