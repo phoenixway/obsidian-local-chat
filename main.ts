@@ -95,7 +95,7 @@ export default class LocalChatPlugin extends Plugin {
 		// Реєстрація UI
 		this.registerView(CHAT_VIEW_TYPE, (leaf) => {
 			this.chatView = new ChatView(leaf, this);
-			this.populateInitialChatViewState();
+			// this.populateInitialChatViewState();
 			return this.chatView;
 		});
 		this.addRibbonIcon('message-circle', 'Open Local Chat', () => this.activateView());

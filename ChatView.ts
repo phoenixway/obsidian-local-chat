@@ -67,9 +67,24 @@ export class ChatView extends ItemView {
 
         // TODO: Load history and initial users (call plugin methods or wait for server push)
         // this.plugin.requestInitialState(); // Example call
+        console.log(`[${this.plugin.manifest.name}] ChatView UI ready. Populating initial state...`);
 
-        console.log(`[${this.plugin.manifest.name}] ChatView opened`);
-        this.inputEl.focus();
+        // Отримуємо поточний список користувачів з плагіна
+        const currentUsers = this.plugin.getAllUsers(); // Викликаємо метод плагіна
+
+        // Додаємо кожного користувача до списку в UI
+        currentUsers.forEach(user => {
+            // Тепер this.userListEl вже має існувати
+            this.addUserToList(user);
+        });
+
+        // TODO: Завантажити та відобразити історію чату тут
+        // const history = await this.plugin.getChatHistory(); // Потрібен метод в main.ts
+        // history.forEach(msg => this.displayMessage(...));
+        // ----------------------------------------------------------------
+
+        this.inputEl.focus(); // Фокус на полі вводу
+        console.log(`[${this.plugin.manifest.name}] ChatView opened and populated.`);
     }
 
     async onClose() {
@@ -125,7 +140,7 @@ export class ChatView extends ItemView {
         // --- ДОДАНО/ПЕРЕВІРЕНО ПЕРЕВІРКУ (GUARD CLAUSE) ---
         if (!this.userListEl) {
             // Якщо елемент списку ще не створено (onOpen не завершився?) - виходимо
-            console.error("addUserToList Error: Attempted to add user before userListEl was ready.");
+            console.error("addU,serToList Error: Attempted to add user before userListEl was ready.");
             return;
         }
         // --- КІНЕЦЬ ПЕРЕВІРКИ ---
