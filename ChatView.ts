@@ -40,6 +40,7 @@ export class ChatView extends ItemView {
         container.addClass('local-chat-view-container'); // Додамо клас для стилізації
 
         // --- Зона Списку Користувачів ---
+        if (!container) return;
         const userListContainer = container.createDiv({ cls: 'chat-sidebar' });
         userListContainer.createEl("h5", { text: "Онлайн:", cls: 'chat-user-list-header' });
         this.userListEl = userListContainer.createDiv({ cls: "chat-user-list" });
