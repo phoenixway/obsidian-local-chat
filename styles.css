@@ -316,3 +316,123 @@
     from { opacity: 0; transform: translateY(5px); }
     to { opacity: 1; transform: translateY(0); }
   } */
+
+  /* Заголовок повідомлення та контрольні елементи */
+.message-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline; /* Краще вирівнювання для тексту різного розміру */
+    margin-bottom: var(--size-4-1);
+    gap: var(--size-4-1); /* Невеликий проміжок */
+  }
+  
+  .message-sender {
+    font-weight: 600;
+    font-size: var(--font-ui-small);
+    /* Не використовуємо margin-right: auto, покладаємось на flex */
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex-shrink: 1; /* Дозволяємо імені скорочуватися */
+    margin-right: var(--size-4-2); /* Відступ від контрольних елементів */
+  }
+  .own-message .message-sender { display: none; }
+  
+  .message-controls {
+    display: flex;
+    align-items: center; /* Вирівняти час і кнопку по центру */
+    gap: var(--size-4-2);
+    margin-left: auto; /* Притиснути до правого краю */
+    flex-shrink: 0; /* Не стискати */
+  }
+  
+  .message-timestamp {
+    font-size: var(--font-ui-smaller);
+    color: var(--text-faint);
+  }
+  
+  /* Кнопка копіювання */
+  .message-copy-button {
+    background: none;
+    border: none;
+    padding: 0;
+    margin: 0;
+    cursor: pointer;
+    color: var(--text-faint); /* Спочатку дуже непомітна */
+    opacity: 0; /* Прихована за замовчуванням */
+    transition: opacity 0.15s ease-in-out, color 0.15s ease-in-out;
+    line-height: 1; /* Для вирівнювання іконки */
+    vertical-align: middle; /* Вирівняти з текстом часу */
+  }
+  
+  /* Показуємо кнопку при наведенні на все повідомлення */
+  .chat-message:hover .message-copy-button {
+    opacity: 0.6; /* Робимо видимою */
+  }
+  
+  .message-copy-button:hover {
+    opacity: 1; /* Повна видимість при наведенні */
+    color: var(--text-accent); /* Колір акценту */
+  }
+  
+  .message-copy-button svg {
+    width: var(--icon-xs); /* Маленька іконка */
+    height: var(--icon-xs);
+  }
+  
+  /* Стилі для контенту Markdown всередині повідомлення */
+  .message-content > *:first-child { margin-top: 0; }
+  .message-content > *:last-child { margin-bottom: 0; }
+  
+  .message-content p {
+      margin-top: var(--size-4-1);
+      margin-bottom: var(--size-4-1);
+      line-height: var(--line-height-normal);
+  }
+  .message-content ul, .message-content ol {
+      margin-left: var(--size-4-4); /* Стандартний відступ списку */
+      margin-top: var(--size-4-1);
+      margin-bottom: var(--size-4-1);
+  }
+  .message-content li {
+      margin-bottom: var(--size-4-1);
+  }
+  .message-content pre {
+      background-color: var(--background-secondary);
+      border: 1px solid var(--background-modifier-border);
+      border-radius: var(--radius-m);
+      padding: var(--size-4-2) var(--size-4-3);
+      overflow-x: auto; /* Горизонтальний скрол для довгого коду */
+      font-family: var(--font-monospace);
+      font-size: var(--font-ui-small);
+      margin: var(--size-4-2) 0;
+  }
+  /* Obsidian не завжди додає клас мови, але про всяк випадок */
+  .message-content pre code[class*="language-"] {
+      background-color: transparent; /* Прибираємо фон для inline-стилю всередині pre */
+      padding: 0;
+      border-radius: 0;
+      font-size: inherit; /* Наслідуємо розмір від pre */
+  }
+  .message-content code { /* Inline code */
+      background-color: var(--background-modifier-hover);
+      padding: 0.15em 0.4em;
+      border-radius: var(--radius-s);
+      font-family: var(--font-monospace);
+      font-size: 90%; /* Трохи менше основного тексту */
+      color: var(--text-normal);
+  }
+  .message-content blockquote {
+      border-left: 3px solid var(--interactive-accent);
+      margin-left: 0;
+      padding-left: var(--size-4-3);
+      color: var(--text-muted);
+      margin-top: var(--size-4-2);
+      margin-bottom: var(--size-4-2);
+  }
+  .message-content blockquote > *:first-child { margin-top: 0; }
+  .message-content blockquote > *:last-child { margin-bottom: 0; }
+  
+  .message-content strong { font-weight: 600; }
+  .message-content em { font-style: italic; }
+  .message-content hr { margin: var(--size-4-4) 0; }
