@@ -1,8 +1,318 @@
-/*
+/* styles.css - Obsidian Local Chat Plugin */
 
-This CSS file will be included with your plugin, and
-available in the app when your plugin is enabled.
-
-If your plugin does not need CSS, delete this file.
-
-*/
+/* ------------------------- */
+/* --- Загальний Макет ----- */
+/* ------------------------- */
+.local-chat-view-container {
+    display: flex; /* Розташовуємо сайдбар та основну область поряд */
+    height: 100%; /* Займає всю висоту панелі */
+    width: 100%;
+    overflow: hidden; /* Запобігаємо випадковому скролу всієї панелі */
+  }
+  
+  .chat-sidebar {
+    width: 160px; /* Початкова ширина списку користувачів */
+    min-width: 120px; /* Мінімальна ширина */
+    max-width: 300px; /* Максимальна ширина */
+    resize: horizontal; /* Дозволяє користувачу змінювати ширину */
+    overflow-x: hidden; /* Ховаємо горизонтальний скрол під час зміни розміру */
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid var(--background-modifier-border); /* Лінія розділення */
+    background-color: var(--background-secondary); /* Трохи інший фон */
+    height: 100%;
+    flex-shrink: 0; /* Не стискати сайдбар */
+  }
+  
+  .chat-main-area {
+    flex-grow: 1; /* Займає решту простору */
+    display: flex;
+    flex-direction: column; /* Повідомлення зверху, поле вводу знизу */
+    height: 100%;
+    overflow: hidden; /* Важливо для правильної роботи скролу повідомлень */
+    background-color: var(--background-primary); /* Основний фон */
+  }
+  
+  /* ------------------------- */
+  /* --- Список Користувачів -- */
+  /* ------------------------- */
+  .chat-user-list-header {
+    padding: var(--size-2-3) var(--size-4-3);
+    font-weight: 600; /* Трохи жирніший */
+    border-bottom: 1px solid var(--background-modifier-border);
+    flex-shrink: 0;
+    color: var(--text-muted);
+    text-align: center;
+  }
+  
+  .chat-user-list {
+    flex-grow: 1; /* Займає доступний простір */
+    overflow-y: auto; /* Додає скрол, якщо користувачів багато */
+    padding: var(--size-4-1) 0;
+  }
+  
+  .chat-user-list-item {
+    display: flex;
+    align-items: center;
+    padding: var(--size-2-2) var(--size-4-3);
+    margin: 1px var(--size-4-1); /* Невеликий відступ навколо */
+    border-radius: var(--radius-m); /* Закруглення */
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis; /* Три крапки для довгих імен */
+    color: var(--text-normal);
+    transition: background-color 0.1s ease-in-out; /* Плавний ховер */
+  }
+  
+  .chat-user-list-item:hover {
+    background-color: var(--background-modifier-hover);
+  }
+  
+  /* Стилі для іконки та нікнейму */
+  .chat-user-list-item .user-icon {
+    margin-right: var(--size-4-2);
+    flex-shrink: 0;
+    color: var(--text-muted); /* Сірувата іконка за замовчуванням */
+  }
+  
+  .chat-user-list-item .user-nickname {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--font-ui-small); /* Трохи менший шрифт */
+  }
+  
+  /* Статуси користувачів (приклад) */
+  .chat-user-list-item.user-online .user-icon {
+    color: var(--color-green); /* Зелений індикатор */
+  }
+  
+  .chat-user-list-item.user-offline { /* Стиль для офлайн, якщо буде потрібно */
+    opacity: 0.6;
+    font-style: italic;
+  }
+  .chat-user-list-item.user-offline .user-icon {
+    color: var(--text-faint);
+  }
+  
+  /* ------------------------- */
+  /* --- Область Повідомлень -- */
+  /* ------------------------- */
+  .chat-message-area {
+    flex-grow: 1; /* Займає весь доступний простір над полем вводу */
+    overflow-y: auto; /* Вертикальний скрол */
+    padding: var(--size-4-4); /* Більше відступів */
+    display: flex;
+    flex-direction: column;
+    gap: var(--size-4-2); /* Відстань між повідомленнями */
+  }
+  
+  /* Стилізація скролбару (для Webkit) */
+  .chat-message-area::-webkit-scrollbar { width: var(--scrollbar-width); }
+  .chat-message-area::-webkit-scrollbar-track { background-color: transparent; } /* Прозорий фон */
+  .chat-message-area::-webkit-scrollbar-thumb { background-color: var(--scrollbar-thumb-bg); border-radius: var(--radius-m); border: 2px solid transparent; background-clip: content-box; }
+  .chat-message-area::-webkit-scrollbar-thumb:hover { background-color: var(--scrollbar-thumb-bg-hover); }
+  
+  /* ------------------------- */
+  /* --- Окремі Повідомлення -- */
+  /* ------------------------- */
+  .chat-message {
+    max-width: 85%; /* Максимальна ширина бульбашки */
+    padding: var(--size-4-2) var(--size-4-3);
+    border-radius: var(--radius-l); /* Сильніше закруглення */
+    word-wrap: break-word; /* Перенос довгих слів */
+    box-shadow: var(--shadow-elevation-1); /* Легка тінь */
+    /* Анімація появи (опціонально) */
+    /* animation: fadeIn 0.2s ease-out; */
+  }
+  
+  /* Моє повідомлення */
+  .chat-message.own-message {
+    align-self: flex-end; /* Вирівнювання праворуч */
+    background-color: var(--interactive-accent); /* Колір акценту теми */
+    color: var(--text-on-accent);
+    border-bottom-right-radius: var(--radius-s); /* Гостріший кут для вигляду "хвостика" */
+  }
+  .chat-message.own-message .message-sender, /* Не показуємо свій нік */
+  .chat-message.own-message .message-timestamp {
+    color: var(--text-on-accent-muted); /* Затемнений текст на фоні акценту */
+  }
+  
+  /* Повідомлення співрозмовника */
+  .chat-message.other-message {
+    align-self: flex-start; /* Вирівнювання ліворуч */
+    background-color: var(--background-secondary-alt); /* Ще один варіант фону */
+    color: var(--text-normal);
+    border-bottom-left-radius: var(--radius-s); /* Гостріший кут */
+  }
+  
+  /* Заголовок повідомлення (відправник + час) */
+  .message-header {
+    display: flex;
+    justify-content: space-between; /* Розносимо по краях */
+    align-items: baseline; /* Вирівнюємо по базовій лінії */
+    margin-bottom: var(--size-4-1);
+    gap: var(--size-4-2);
+  }
+  
+  .message-sender {
+    font-weight: 600; /* Жирніший */
+    font-size: var(--font-ui-small);
+    margin-right: auto; /* Відсуває час праворуч */
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 60%; /* Обмеження ширини ніку */
+  }
+  .own-message .message-sender {
+    display: none; /* Не показуємо власний нік */
+  }
+  
+  .message-timestamp {
+    font-size: var(--font-ui-smaller);
+    color: var(--text-faint); /* Дуже світлий */
+    flex-shrink: 0; /* Не стискати */
+  }
+  
+  /* Вміст повідомлення */
+  .message-content {
+    /* Можна додати стилі для посилань, коду тощо, якщо буде Markdown */
+  }
+  .message-content a { /* Стиль посилань як в Obsidian */
+      text-decoration: none;
+      color: var(--text-accent);
+  }
+  .message-content a:hover {
+      text-decoration: underline;
+  }
+  
+  /* ------------------------- */
+  /* --- Передача Файлів ----- */
+  /* ------------------------- */
+  .chat-message.file-offer,
+  .chat-message.file-upload {
+      border-left: 3px solid var(--interactive-accent); /* Лінія-індикатор файлу */
+  }
+  .own-message.file-upload {
+      border-left: none;
+      border-right: 3px solid var(--background-primary-alt); /* Індикатор для своїх */
+  }
+  
+  .file-offer-actions,
+  .file-progress-container {
+    margin-top: var(--size-4-2);
+    display: flex;
+    align-items: center;
+    gap: var(--size-4-2);
+  }
+  
+  /* Кнопки Прийняти/Відхилити */
+  .file-offer-actions button {
+    font-size: var(--font-ui-small);
+    padding: var(--size-2-1) var(--size-4-2);
+    /* Використовуємо стилі кнопок Obsidian */
+  }
+  
+  /* Прогрес-бар */
+  .file-progress-container progress {
+    flex-grow: 1;
+    height: 6px; /* Тонший */
+    border-radius: var(--radius-s);
+    overflow: hidden;
+    appearance: none;
+    background-color: var(--background-modifier-border); /* Колір фону треку */
+  }
+  .file-progress-container progress::-webkit-progress-bar { background-color: inherit; border-radius: var(--radius-s); }
+  .file-progress-container progress::-webkit-progress-value { background-color: var(--interactive-accent); border-radius: var(--radius-s); transition: width 0.1s linear; }
+  .file-progress-container progress::-moz-progress-bar { background-color: var(--interactive-accent); border-radius: var(--radius-s); transition: width 0.1s linear; }
+  
+  /* Текст прогресу */
+  .progress-text {
+    font-size: var(--font-ui-small);
+    color: var(--text-muted);
+    flex-shrink: 0;
+  }
+  
+  /* Статуси повідомлень файлів */
+  .chat-message.transfer-completed .progress-text {
+    color: var(--color-green);
+  }
+  .chat-message.transfer-error .progress-text {
+    color: var(--color-red);
+    font-weight: bold;
+  }
+  .chat-message.offer-accepted .progress-text,
+  .chat-message.waiting_accept .progress-text { /* Додано */
+    color: var(--color-blue);
+    font-style: italic;
+  }
+  .chat-message.offer-declined .progress-text {
+    color: var(--text-muted);
+    font-style: italic;
+  }
+  
+  
+  /* ------------------------- */
+  /* --- Область Вводу ------- */
+  /* ------------------------- */
+  .chat-input-area {
+    display: flex;
+    align-items: center;
+    padding: var(--size-4-2) var(--size-4-3);
+    border-top: 1px solid var(--background-modifier-border);
+    gap: var(--size-4-2);
+    flex-shrink: 0; /* Не стискати */
+    background-color: var(--background-secondary); /* Може бути інший фон */
+  }
+  
+  .chat-input {
+    flex-grow: 1;
+    background-color: var(--input-background);
+    border: 1px solid var(--input-border);
+    color: var(--text-normal);
+    padding: var(--size-2-2) var(--size-4-2);
+    border-radius: var(--radius-m);
+    min-height: 30px;
+    line-height: var(--line-height-normal); /* Для кращого вигляду тексту */
+    resize: none; /* Якщо це буде textarea */
+  }
+  .chat-input:focus {
+    outline: none;
+    border-color: var(--interactive-accent);
+    box-shadow: 0 0 0 1px var(--interactive-accent);
+  }
+  
+  /* Кнопки біля поля вводу */
+  .chat-send-button,
+  .chat-file-button {
+    background: none;
+    border: none;
+    padding: var(--size-4-1);
+    cursor: pointer;
+    color: var(--text-muted);
+    border-radius: var(--radius-m);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: background-color 0.1s ease-in-out, color 0.1s ease-in-out; /* Плавний ховер */
+  }
+  
+  .chat-send-button:hover,
+  .chat-file-button:hover {
+    background-color: var(--background-modifier-hover);
+    color: var(--interactive-accent-hover); /* Яскравіший колір при ховері */
+  }
+  
+  .chat-send-button svg,
+  .chat-file-button svg {
+    width: var(--icon-m); /* Трохи більші іконки */
+    height: var(--icon-m);
+  }
+  
+  /* --- Анімація (простий приклад) --- */
+  /* @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(5px); }
+    to { opacity: 1; transform: translateY(0); }
+  } */
