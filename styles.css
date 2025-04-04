@@ -436,3 +436,23 @@
   .message-content strong { font-weight: 600; }
   .message-content em { font-style: italic; }
   .message-content hr { margin: var(--size-4-4) 0; }
+
+  .message-content ul,
+.message-content ol {
+  list-style: revert; /* Try reverting to browser/theme defaults */
+  /* OR be explicit: */
+  /* list-style-type: disc; */ /* For ul */
+  /* list-style-type: decimal; */ /* For ol */
+  list-style-position: outside; /* Or 'inside' */
+  padding-left: var(--size-4-5); /* Ensure enough padding for outside markers */
+  margin-left: 0; /* Use padding instead of margin for indent with outside markers */
+  /* Keep margins for spacing between blocks */
+  margin-top: var(--size-4-1);
+  margin-bottom: var(--size-4-1);
+}
+
+.message-content li {
+   margin-bottom: var(--size-4-1);
+   /* Ensure list items behave as expected */
+   display: list-item;
+}
